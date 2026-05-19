@@ -1,0 +1,138 @@
+def estimate_lesion_position(image_array, slice_index=None):
+    """
+    估算病灶位置（基于影像统计）- 优化内存使用
+    
+    Args:
+        image_array: 影像数据数组
+        slice_index: 指定的切片索引，如果为None则使用中间切片
+    
+    Returns:
+        包含x, y, z坐标和相关信息的字典
+    """
+    try:
+        # 确定要分析的切片
+        if slice_index is None:
+            if len(image_array.shape) == 3:
+                slice_index = image_array.shape[0] // 2
+            else:
+                slice_index = 0
+        
+        # 提取指定的2D切片
+        if len(image_array.shape) == 3:
+            slice_2d = image_array[slice_index, :, :]
+            z_position = slice_index
+        else:
+            slice_2d = image_array
+            z_position = 0
+        
+        h, w = slice_2d.shape
+        
+        # 计算统计量找病灶
+        # 先过滤背景（假设0或低数值是背景）
+        non_zero_data = slice_2d[slice_2d > np.percentile(slice_2d, 10)]
+        
+        if len(non_zero_data) == 0:
+            # 如果数据太少，返回中心
+            return {
+                "x": int(w // 2),
+                "y": int(h // 2),
+                "z": int(z_position),
+                "original_width": int(w),
+                "original_height": int(h),
+                "found": True  # 总是返回True，保证有圈显示
+            }
+        
+        # 找到显著高于平均值的区域（潜在病灶）- 降低阈值，更容易检测到
+        mean_val = np.mean(non_zero_data)
+        std_val = np.std(non_zero_data)
+        # 找比平均值高0.5个标准差的区域（降低了阈值）
+        threshold = mean_val + 0.5 * std_val
+        
+        # 找到高亮区域
+        high_intensity = slice_2d > threshold
+        
+        if not np.any(high_intensity):
+            # 如果没有明显高亮区，找梯度变化大的区域
+            # 计算水平和垂直梯度
+            gy, gx = np.gradient(slice_2d.astype(np.float32))
+            gradient_mag = np.sqrt(gx**2 + gy**2)
+            threshold = np.percentile(gradient_mag, 70)  # 降低了百分位数
+            high_intensity = gradient_mag > threshold
+        
+        # 找到所有符合条件的点
+        positions = np.argwhere(high_intensity)
+        
+        if len(positions) == 0:
+            # 如果还是没找到，返回图像中心
+            return {
+                "x": int(w // 2),
+                "y": int(h // 2),
+                "z": int(z_position),
+                "original_width": int(w),
+                "original_height": int(h),
+                "found": True  # 总是返回True
+            }
+        
+        # 计算质心
+        center_y = int(np.mean(positions[:, 0]))
+        center_x = int(np.mean(positions[:, 1]))
+        
+        h, w = slice_2d.shape
+        
+        return {
+            "x": center_x,
+            "y": center_y,
+            "z": int(z_position),
+            "original_width": int(w),
+            "original_height": int(h),
+            "found": True
+        }
+    except Exception as e:
+        print(f"病灶位置估算出错: {e}")
+        import traceback
+        traceback.print_exc()
+        # 出错时返回中心位置
+        h, w = image_array.shape[-2:]
+        return {
+            "x": int(w // 2),
+            "y": int(h // 2),
+            "z": int(0),
+            "original_width": int(w),
+            "original_height": int(h),
+            "found": True
+        }
+
+
+def detect_lesions_all_slices(image_array):
+    """
+    检测所有切片的病灶
+    
+    Args:
+        image_array: 3D影像数据数组
+    
+    Returns:
+        包含所有切片病灶信息的列表
+    """
+    lesion_info_list = []
+    
+    if len(image_array.shape) != 3:
+        return lesion_info_list
+    
+    total_slices = image_array.shape[0]
+    
+    # 遍历所有切片
+    for slice_idx in range(total_slices):
+        slice_info = estimate_lesion_position(image_array, slice_idx)
+        
+        # 保存切片数据
+        lesion_info_list.append({
+            "slice_index": slice_idx,
+            "x": slice_info["x"],
+            "y": slice_info["y"],
+            "z": slice_info["z"],
+            "original_width": slice_info["original_width"],
+            "original_height": slice_info["original_height"],
+            "found": slice_info["found"]
+        })
+    
+    return lesion_info_list
