@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # 医学图像处理系统
 
 一个基于Vue3和FastAPI的医学图像处理可视化系统，支持NII文件预览、病灶识别和3D立体可视化。
@@ -85,3 +86,6 @@ medical-image-processing/
 ## 许可证
 
 MIT License
+=======
+# medical-image-processing
+>>>>>>> 849588d28777af6e66ff62ab3c72070021a07e82
