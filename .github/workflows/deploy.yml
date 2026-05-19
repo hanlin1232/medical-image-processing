@@ -18,20 +18,11 @@ jobs:
           node-version: '20.x'
           cache: 'npm'
 
-      - name: Debug - Check Node.js version
-        run: node --version && npm --version
-
       - name: Install dependencies
-        run: npm install --verbose
-
-      - name: Debug - List installed packages
-        run: npm list
+        run: npm ci
 
       - name: Build project
-        run: npm run build
-
-      - name: Debug - List dist directory
-        run: ls -la dist/
+        run: npx vite build
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
