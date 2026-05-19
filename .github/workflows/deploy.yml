@@ -15,14 +15,23 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '20.x'
           cache: 'npm'
 
+      - name: Debug - Check Node.js version
+        run: node --version && npm --version
+
       - name: Install dependencies
-        run: npm install
+        run: npm install --verbose
+
+      - name: Debug - List installed packages
+        run: npm list
 
       - name: Build project
         run: npm run build
+
+      - name: Debug - List dist directory
+        run: ls -la dist/
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
