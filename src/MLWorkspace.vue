@@ -10,9 +10,38 @@
       </div>
     </header>
 
+    <nav class="top-nav">
+      <div class="nav-inner">
+        <a href="#nii-upload" class="nav-link" :class="{ active: activeNavSection === 'nii-upload' }"
+          @click.prevent="scrollTo('nii-upload')">
+          <span class="nav-icon">📁</span><span class="nav-text">NII上传</span>
+        </a>
+        <a href="#feature-info" class="nav-link" :class="{ active: activeNavSection === 'feature-info' }"
+          @click.prevent="scrollTo('feature-info')">
+          <span class="nav-icon">📋</span><span class="nav-text">特征说明</span>
+        </a>
+        <a href="#csv-normalize" class="nav-link" :class="{ active: activeNavSection === 'csv-normalize' }"
+          @click.prevent="scrollTo('csv-normalize')">
+          <span class="nav-icon">⚡</span><span class="nav-text">CSV归一化</span>
+        </a>
+        <a href="#dataset-split" class="nav-link" :class="{ active: activeNavSection === 'dataset-split' }"
+          @click.prevent="scrollTo('dataset-split')">
+          <span class="nav-icon">📊</span><span class="nav-text">数据集划分</span>
+        </a>
+        <a href="#svm-train" class="nav-link" :class="{ active: activeNavSection === 'svm-train' }"
+          @click.prevent="scrollTo('svm-train')">
+          <span class="nav-icon">🧠</span><span class="nav-text">SVM训练</span>
+        </a>
+        <a href="#lesion-detect" class="nav-link" :class="{ active: activeNavSection === 'lesion-detect' }"
+          @click.prevent="scrollTo('lesion-detect')">
+          <span class="nav-icon">🔍</span><span class="nav-text">病灶识别</span>
+        </a>
+      </div>
+    </nav>
+
     <main class="main-content">
-      <section class="nii-upload-section">
-        <h2>NII文件上传</h2>
+      <section class="nii-upload-section" id="nii-upload">
+        <h2>📁 NII文件上传</h2>
 
         <!-- 上传方式切换 -->
         <div class="upload-mode-switch">
@@ -82,16 +111,58 @@
               </div>
             </div>
 
-            <!-- 显示所有NII文件列表 -->
+            <!-- 显示所有NII文件列表（可折叠） -->
             <div class="nii-files-list">
-              <h4>📁 找到的NII文件:</h4>
-              <ul>
+              <h4 @click="showNiiFileList = !showNiiFileList" class="collapsible-header">
+                <span class="collapse-arrow">{{ showNiiFileList ? '▼' : '▶' }}</span>
+                📁 找到的NII文件 ({{ niiFiles.length }})
+              </h4>
+              <ul v-if="showNiiFileList">
                 <li v-for="(file, index) in niiFiles" :key="index">
                   {{ file.name }}
                   <span v-if="imageFile && imageFile.name === file.name" class="file-tag image-tag">影像</span>
                   <span v-if="roiFile && roiFile.name === file.name" class="file-tag roi-tag">ROI</span>
                 </li>
               </ul>
+            </div>
+          </div>
+          <!-- 批量患者检测结果 -->
+          <div v-if="detectedPatients.length > 0" class="detected-patients-section">
+            <h3>检测到 {{ detectedPatients.length }} 个患者</h3>
+            <div class="patients-table-wrapper">
+              <table class="patients-table">
+                <thead>
+                  <tr>
+                    <th><input type="checkbox" @click.stop="toggleSelectAllPatients" :checked="allPatientsSelected"
+                        title="全选" /></th>
+                    <th>患者ID</th>
+                    <th>标签文件夹</th>
+                    <th>映射标签</th>
+                    <th>Lung文件</th>
+                    <th>ROI文件</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(p, idx) in detectedPatients" :key="idx"
+                    :class="{ 'selected-row': selectedPatientIndex === idx }" @click="selectBatchPatient(idx)">
+                    <td><input type="checkbox" :checked="selectedPatientIndices.includes(idx)"
+                        @click.stop="togglePatientSelect(idx)" /></td>
+                    <td>{{ p.patientId }}</td>
+                    <td>{{ p.label }}</td>
+                    <td>{{ detectedLabelMap[p.label] || p.label }}</td>
+                    <td :class="p.lung ? 'file-ok' : 'file-missing'">{{ p.lung ? p.lung.name : '缺失' }}</td>
+                    <td :class="p.roi ? 'file-ok' : 'file-missing'">{{ p.roi ? p.roi.name : '缺失' }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="patient-actions">
+              <button @click="useSelectedPatient" :disabled="selectedPatientIndex < 0" class="btn-extract">
+                使用选中患者提取特征
+              </button>
+              <button @click="batchExtractAllPatients" :disabled="isExtracting" class="btn-download">
+                批量提取全部患者
+              </button>
             </div>
           </div>
         </div>
@@ -125,11 +196,32 @@
           </div>
         </div>
 
+        <!-- 患者信息 -->
+        <div class="patient-info-row">
+          <div class="patient-input-group">
+            <label>患者ID</label>
+            <input type="text" v-model="patientId" placeholder="例: P00173278" class="patient-input" />
+          </div>
+          <div class="patient-input-group">
+            <label>标签</label>
+            <select v-model="patientLabel" class="patient-input">
+              <option value="">请选择</option>
+              <option value="0">0</option>
+              <option value="1">1</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- 单独文件模式的提取按钮 -->
+        <button v-if="uploadMode === 'files'" @click="extractFeatures" class="btn-extract"
+          :disabled="!imageFile || !roiFile || isExtracting">
+          {{ isExtracting ? '提取中...' : '提取影像组学特征' }}
+        </button>
+
         <!-- 后端状态提示 -->
         <div v-if="backendStatus" :class="['backend-status', backendStatus.status]">
           <span class="status-icon">{{ backendStatus.status === 'success' ? '✓' : '⚠' }}</span>
           <span>{{ backendStatus.message }}</span>
-          <span v-if="backendStatus.has_pyradiomics" class="pyradiomics-badge">PyRadiomics 可用</span>
         </div>
 
         <!-- 影像预览区域 -->
@@ -160,82 +252,10 @@
             </div>
           </div>
         </div>
-
-        <button @click="extractFeatures" class="btn-extract" :disabled="!imageFile || !roiFile || isExtracting">
-          {{ isExtracting ? '提取中...' : '🔬 使用PyRadiomics提取特征' }}
-        </button>
-
-        <div class="note-box">
-          <p>💡 <strong>提示:</strong>
-            <template v-if="backendStatus?.has_pyradiomics">
-              当前使用真实的PyRadiomics库进行特征提取。
-            </template>
-            <template v-else>
-              当前使用模拟数据演示。如需真实的PyRadiomics特征提取，请在本地Python环境中安装PyRadiomics库，并启动backend/main.py服务。
-            </template>
-          </p>
-        </div>
       </section>
 
-      <section class="features-section">
-        <h2>提取的特征</h2>
-
-        <div v-if="features" class="features-content">
-          <div class="features-summary">
-            <div class="summary-card">
-              <span class="summary-label">特征总数</span>
-              <span class="summary-value">{{ features.feature_count }}</span>
-            </div>
-            <div class="summary-card" v-if="features.is_real !== undefined">
-              <span class="summary-label">特征来源</span>
-              <span class="summary-value">{{ features.is_real ? '真实提取' : '模拟数据' }}</span>
-            </div>
-          </div>
-
-          <div class="features-tabs">
-            <button v-for="tab in featureTabs" :key="tab.key" @click="activeTab = tab.key" class="tab-btn"
-              :class="{ active: activeTab === tab.key }">
-              {{ tab.label }}
-              <span class="tab-count">{{ getFeatureCountByCategory(tab.key) }}</span>
-            </button>
-          </div>
-
-          <div class="features-table-wrapper">
-            <table class="features-table">
-              <thead>
-                <tr>
-                  <th>特征名称</th>
-                  <th>数值</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="(value, key) in filteredFeatures" :key="key">
-                  <td>{{ formatFeatureName(key) }}</td>
-                  <td>{{ typeof value === 'number' ? value.toFixed(6) : value }}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-
-          <div class="features-actions">
-            <button @click="downloadFeatures" class="btn-download">
-              💾 下载特征CSV
-            </button>
-            <button @click="downloadFeaturesJson" class="btn-download">
-              📄 下载特征JSON
-            </button>
-          </div>
-        </div>
-
-        <div v-else class="features-placeholder">
-          <div class="placeholder-icon">🔍</div>
-          <p>上传NII文件后点击"提取特征"按钮</p>
-          <p class="placeholder-hint">支持形状特征、一阶统计、纹理特征等</p>
-        </div>
-      </section>
-
-      <section class="feature-info-section">
-        <h2>特征类别说明</h2>
+      <section class="feature-info-section" id="feature-info">
+        <h2>📋 特征类别说明</h2>
         <div class="info-cards">
           <div class="info-card" v-for="(desc, key) in featureCategories" :key="key">
             <h4>{{ getCategoryIcon(key) }} {{ key.toUpperCase() }}</h4>
@@ -245,7 +265,7 @@
       </section>
 
       <!-- 归一化模块 -->
-      <section class="csv-section">
+      <section class="csv-section" id="csv-normalize">
         <h2>⚡ CSV归一化</h2>
         <div class="csv-upload-area">
           <input type="file" ref="normCsvFile" id="norm-csv" @change="handleNormCsvSelect" accept=".csv"
@@ -284,7 +304,7 @@
       </section>
 
       <!-- 数据集划分模块 -->
-      <section class="csv-section">
+      <section class="csv-section" id="dataset-split">
         <h2>📊 数据集划分</h2>
         <div class="csv-upload-area">
           <input type="file" ref="splitCsvFile" id="split-csv" @change="handleSplitCsvSelect" accept=".csv"
@@ -326,22 +346,22 @@
       </section>
 
       <!-- SVM训练模块 -->
-      <section class="svm-section">
+      <section class="svm-section" id="svm-train">
         <h2>🧠 SVM分类器训练</h2>
 
         <div class="svm-upload">
-          <input type="file" ref="svmTrainFile" id="svm-train" @change="handleSvmTrainFileSelect" accept=".csv"
+          <input type="file" ref="svmTrainFile" id="svm-train-file" @change="handleSvmTrainFileSelect" accept=".csv"
             class="csv-input" />
-          <label for="svm-train" class="csv-upload-btn">
+          <label for="svm-train-file" class="csv-upload-btn">
             📁 上传训练CSV
           </label>
           <span v-if="svmTrainFileName" class="csv-file-name">{{ svmTrainFileName }}</span>
         </div>
 
         <div class="svm-upload">
-          <input type="file" ref="svmTestFile" id="svm-test" @change="handleSvmTestFileSelect" accept=".csv"
+          <input type="file" ref="svmTestFile" id="svm-test-file" @change="handleSvmTestFileSelect" accept=".csv"
             class="csv-input" />
-          <label for="svm-test" class="csv-upload-btn">
+          <label for="svm-test-file" class="csv-upload-btn">
             📁 上传测试CSV（可选）
           </label>
           <span v-if="svmTestFileName" class="csv-file-name">{{ svmTestFileName }}</span>
@@ -391,37 +411,37 @@
             </div>
           </div>
 
-          <div v-if="svmResult.confusion_matrix" class="confusion-matrix">
+          <div v-if="svmResult.confusion_matrix && svmResult.confusion_matrix.length === 2" class="confusion-matrix">
             <h4>🔢 混淆矩阵</h4>
             <div class="matrix-container">
-              <div class="matrix-row" v-for="(row, i) in svmResult.confusion_matrix" :key="i">
-                <div v-for="(cell, j) in row" :key="j" class="matrix-cell"
-                  :style="{ backgroundColor: getMatrixColor(cell) }">
-                  {{ cell }}
-                </div>
+              <div class="matrix-row">
+                <div class="matrix-cell tn">{{ svmResult.confusion_matrix[0][0] }}<span class="cell-label">TN</span></div>
+                <div class="matrix-cell fp">{{ svmResult.confusion_matrix[0][1] }}<span class="cell-label">FP</span></div>
+              </div>
+              <div class="matrix-row">
+                <div class="matrix-cell fn">{{ svmResult.confusion_matrix[1][0] }}<span class="cell-label">FN</span></div>
+                <div class="matrix-cell tp">{{ svmResult.confusion_matrix[1][1] }}<span class="cell-label">TP</span></div>
               </div>
             </div>
             <div class="matrix-labels">
-              <span>真实\预测</span>
+              <span>行=真实 / 列=预测</span>
             </div>
           </div>
 
-          <div v-if="svmResult.roc_data" class="roc-chart">
+          <div v-show="svmResult.roc_data" class="roc-chart">
             <h4>📉 ROC曲线</h4>
             <div class="chart-container">
-              <canvas ref="rocCanvas"></canvas>
+              <canvas ref="rocCanvas" width="400" height="300"></canvas>
             </div>
           </div>
 
           <div v-if="svmResult.feature_importance" class="feature-heatmap">
             <h4>🔥 特征重要性</h4>
             <div class="heatmap-container">
-              <div class="heatmap-row">
-                <div v-for="(importance, name) in svmResult.feature_importance" :key="name" class="heatmap-cell"
-                  :style="{ backgroundColor: getHeatmapColor(importance) }"
-                  :title="name + ': ' + importance.toFixed(4)">
-                  {{ name }}
-                </div>
+              <div class="heatmap-row" v-for="(importance, name) in svmResult.feature_importance" :key="name">
+                <span class="heatmap-label">{{ name }}</span>
+                <div class="heatmap-bar" :style="{ width: (importance * 100) + '%' }"></div>
+                <span class="heatmap-value">{{ (importance * 100).toFixed(1) }}%</span>
               </div>
             </div>
           </div>
@@ -449,8 +469,8 @@
         </div>
       </section>
 
-      <section class="predict-section">
-        <h2>🔍 病灶识别与3D可视化</h2>
+      <section class="predict-section" id="lesion-detect">
+        <h2>🔍 病灶识别</h2>
 
         <div class="predict-content">
           <!-- 左侧：上传控件 + 识别结果 -->
@@ -479,9 +499,6 @@
             <div v-if="modelLoaded && niiImageLoaded" class="predict-controls">
               <button @click="predictLesion" class="btn-process btn-predict" :disabled="isPredicting">
                 {{ isPredicting ? '识别中...' : '🚀 开始识别' }}
-              </button>
-              <button @click="detect3DLesions" class="btn-process btn-predict" :disabled="isDetecting3D">
-                {{ isDetecting3D ? '3D分析中...' : '🎮 开始3D检测' }}
               </button>
             </div>
 
@@ -545,7 +562,7 @@
             </div>
           </div>
 
-          <!-- 右侧：2D预览 + 3D可视化 -->
+          <!-- 右侧：2D影像预览 -->
           <div class="predict-right">
             <!-- 2D影像预览 -->
             <div class="nii-preview">
@@ -554,12 +571,16 @@
                 <div class="image-wrapper" :class="{ 'has-lesion': hasLesion }">
                   <img :src="niiPreview.image" alt="NII Preview" class="nii-image" ref="niiImageRef"
                     @load="onImageLoad" />
-                  <!-- 只在有病灶时显示标注 -->
+                  <!-- 只在有病灶时显示轮廓标注 -->
                   <svg v-if="hasLesion" class="lesion-overlay" :width="overlayWidth" :height="overlayHeight">
-                    <circle :cx="lesionCircleX" :cy="lesionCircleY" :r="lesionCircleRadius" fill="none" stroke="#ff4444"
-                      stroke-width="3" stroke-dasharray="6,4" />
-                    <circle :cx="lesionCircleX" :cy="lesionCircleY" :r="lesionCircleRadius + 8" fill="none"
-                      stroke="#ff4444" stroke-width="1.5" stroke-opacity="0.5" />
+                    <path v-if="lesionContourPath" :d="lesionContourPath" fill="rgba(255, 68, 68, 0.25)"
+                      stroke="#ff4444" stroke-width="2.5" />
+                    <rect v-if="lesionBBox" :x="lesionBBox.x" :y="lesionBBox.y" :width="lesionBBox.width"
+                      :height="lesionBBox.height" fill="none" stroke="#ffeb3b" stroke-width="1.5"
+                      stroke-dasharray="6,4" />
+                    <circle v-if="!lesionContourPath" :cx="overlayWidth / 2" :cy="overlayHeight / 2"
+                      :r="Math.min(overlayWidth, overlayHeight) * 0.15" fill="none" stroke="#ff4444" stroke-width="3"
+                      stroke-dasharray="6,4" />
                   </svg>
                   <!-- 如果没有病灶，显示安全提示 -->
                   <div v-if="!hasLesion && predictResult" class="no-lesion-overlay">
@@ -586,116 +607,6 @@
               </div>
             </div>
 
-            <!-- 3D立体可视化 -->
-            <div class="three-d-section">
-              <h3>🎮 3D立体可视化</h3>
-
-              <!-- 没有文件的提示 -->
-              <div v-if="!niiImageLoaded && !threeDResult" class="no-file-hint">
-                <div class="hint-card">
-                  <span class="hint-icon">📂</span>
-                  <p class="hint-text">请上传NII文件以使用3D功能</p>
-                </div>
-              </div>
-
-              <!-- 有文件但没3D结果 -->
-              <div v-else-if="!threeDResult" class="hint-card">
-                <span class="hint-icon">✅</span>
-                <p class="hint-text">文件已就绪，点击上方「🎮 开始3D检测」</p>
-              </div>
-
-              <!-- 3D可视化结果 -->
-              <div v-if="threeDResult" class="three-d-display">
-                <div class="three-d-info">
-                  <h3>📊 检测结果</h3>
-                  <div class="info-grid">
-                    <div class="info-item">
-                      <span class="info-label">总切片数:</span>
-                      <span class="info-value">{{ threeDResult.total_slices }}</span>
-                    </div>
-                    <div class="info-item">
-                      <span class="info-label">影像形状:</span>
-                      <span class="info-value">{{ threeDResult.image_shape.join(' × ') }}</span>
-                    </div>
-                    <div class="info-item">
-                      <span class="info-label">检测到病灶:</span>
-                      <span class="info-value">{{threeDResult.lesions.filter(l => l.found).length}}个</span>
-                    </div>
-                  </div>
-                </div>
-
-                <!-- 多视图显示 -->
-                <div class="multi-view-container">
-                  <div class="view-header">
-                    <h4>📽️ 关键切片预览</h4>
-                    <div class="slice-nav">
-                      <button @click="prev3DSlice" :disabled="current3DSliceIndex === 0" class="nav-btn">◀</button>
-                      <span class="slice-indicator">
-                        {{ current3DSliceIndex + 1 }} / {{ threeDResult.preview_slices.length }}
-                      </span>
-                      <button @click="next3DSlice"
-                        :disabled="current3DSliceIndex === threeDResult.preview_slices.length - 1"
-                        class="nav-btn">▶</button>
-                    </div>
-                  </div>
-
-                  <div class="slices-gallery">
-                    <div v-for="(slice, idx) in threeDResult.preview_slices" :key="idx" class="slice-card"
-                      :class="{ active: idx === current3DSliceIndex }" @click="current3DSliceIndex = idx">
-                      <div class="slice-thumb">
-                        <img :src="slice.image" alt="切片" class="slice-img" />
-                        <div class="lesion-marker" v-if="slice.lesion_info.found">
-                          <svg class="lesion-circle" :width="120" :height="120">
-                            <circle :cx="getScaledCoord(slice.lesion_info.x, slice.lesion_info.original_width, 120)"
-                              :cy="getScaledCoord(slice.lesion_info.y, slice.lesion_info.original_height, 120)" :r="15"
-                              fill="none" stroke="#ff4444" stroke-width="3" />
-                          </svg>
-                        </div>
-                      </div>
-                      <span class="slice-label">切片 #{{ slice.slice_index }}</span>
-                    </div>
-                  </div>
-
-                  <!-- 当前选中切片的大图 -->
-                  <div v-if="current3DSlice" class="large-slice-display">
-                    <h5>切片 #{{ current3DSlice.slice_index }}</h5>
-                    <div class="large-slice-wrapper">
-                      <img :src="current3DSlice.image" alt="切片" class="large-slice-img" />
-                      <svg v-if="current3DSlice.lesion_info.found" class="lesion-overlay-large" :width="overlayWidth3D"
-                        :height="overlayHeight3D">
-                        <circle
-                          :cx="getScaledCoord(current3DSlice.lesion_info.x, current3DSlice.lesion_info.original_width, overlayWidth3D)"
-                          :cy="getScaledCoord(current3DSlice.lesion_info.y, current3DSlice.lesion_info.original_height, overlayHeight3D)"
-                          :r="lesionRadius3D" fill="none" stroke="#ff4444" stroke-width="4" stroke-dasharray="8,4" />
-                      </svg>
-                    </div>
-                    <div class="lesion-coords">
-                      病灶位置: (X: {{ current3DSlice.lesion_info.x }}, Y: {{ current3DSlice.lesion_info.y }}, Z: {{
-                        current3DSlice.lesion_info.z }})
-                    </div>
-                  </div>
-                </div>
-
-                <!-- 3D点云可视化（简化版） -->
-                <div class="point-cloud-section">
-                  <h4>🎯 病灶3D分布</h4>
-                  <div class="point-cloud-container" ref="pointCloudRef">
-                    <div class="point-cloud-view">
-                      <div v-for="(lesion, idx) in threeDResult.lesions.filter(l => l.found)" :key="idx"
-                        class="lesion-point" :style="getLesionPointStyle(lesion)"
-                        :title="`切片 ${lesion.slice_index}: (${lesion.x}, ${lesion.y})`">
-                      </div>
-                    </div>
-                    <div class="point-cloud-legend">
-                      <div class="legend-item">
-                        <span class="legend-dot"></span>
-                        <span>病灶位置</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div> <!-- 闭合 three-d-display -->
-            </div> <!-- 闭合 three-d-section -->
           </div> <!-- 闭合 predict-right -->
         </div> <!-- 闭合 predict-content -->
       </section>
@@ -719,154 +630,43 @@ import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue';
 // 后端API地址
 const API_BASE = '/api';
 
-// 模拟PyRadiomics特征数据
-const generateMockFeatures = () => {
-  const features = {};
-
-  // 形状特征
-  const shape_features = [
-    ('shape_VoxelVolume', 1250.5),
-    ('shape_SurfaceArea', 892.3),
-    ('shape_SurfaceVolumeRatio', 0.714),
-    ('shape_Sphericity', 0.65),
-    ('shape_Compactness1', 0.82),
-    ('shape_Compactness2', 0.78),
-    ('shape_ShapeIndex', 1.23),
-    ('shape_Maximum3DDiameter', 15.6),
-    ('shape_Maximum2DDiameterSlice', 12.3),
-    ('shape_Maximum2DDiameterColumn', 11.8),
-    ('shape_Maximum2DDiameterRow', 10.5),
-    ('shape_MeshVolume', 1245.8),
-    ('shape_LargestDiameter', 16.2),
-    ('shape_MajorAxisLength', 14.5),
-    ('shape_MinorAxisLength', 10.2),
-    ('shape_LeastAxisLength', 8.7),
-    ('shape_Eccentricity', 0.72),
-    ('shape_Flatness', 0.61),
-    ('shape_Elongation', 1.42),
-    ('shape_VolumetricSurfaceArea', 888.5)
-  ];
-
-  // 一阶统计特征
-  const firstorder_features = [
-    ('firstorder_Mean', 128.5),
-    ('firstorder_Variance', 256.8),
-    ('firstorder_Skewness', 0.35),
-    ('firstorder_Kurtosis', -0.12),
-    ('firstorder_Minimum', 32.0),
-    ('firstorder_Maximum', 245.0),
-    ('firstorder_Range', 213.0),
-    ('firstorder_InterquartileRange', 45.6),
-    ('firstorder_Median', 125.0),
-    ('firstorder_MeanAbsoluteDeviation', 15.3),
-    ('firstorder_RobustMeanAbsoluteDeviation', 12.1),
-    ('firstorder_RootMeanSquared', 135.8),
-    ('firstorder_Energy', 17568.3),
-    ('firstorder_Entropy', 7.85),
-    ('firstorder_TotalEnergy', 1575625.0),
-    ('firstorder_MaximumProbability', 0.023),
-    ('firstorder_MinimumProbability', 0.001),
-    ('firstorder_P10', 85.0),
-    ('firstorder_P90', 175.0),
-    ('firstorder_P25', 105.0),
-    ('firstorder_P75', 150.0)
-  ];
-
-  // GLCM 特征
-  const glcm_features = [
-    ('glcm_Autocorrelation', 16785.3),
-    ('glcm_ClusterProminence', 125.6),
-    ('glcm_ClusterShade', 89.2),
-    ('glcm_ClusterTendency', 78.4),
-    ('glcm_Contrast', 156.8),
-    ('glcm_Correlation', 0.92),
-    ('glcm_DifferenceAverage', 12.5),
-    ('glcm_DifferenceEntropy', 3.2),
-    ('glcm_DifferenceVariance', 45.6),
-    ('glcm_Energy', 0.085),
-    ('glcm_Entropy', 4.85),
-    ('glcm_Homogeneity1', 0.78),
-    ('glcm_Homogeneity2', 0.82),
-    ('glcm_Id', 0.65),
-    ('glcm_Idm', 0.71),
-    ('glcm_Idmn', 0.68),
-    ('glcm_Idn', 0.75),
-    ('glcm_InverseVariance', 0.023),
-    ('glcm_JointAverage', 128.5),
-    ('glcm_JointEnergy', 0.007),
-    ('glcm_JointEntropy', 9.2),
-    ('glcm_MaximumProbability', 0.085),
-    ('glcm_SumAverage', 257.0),
-    ('glcm_SumEntropy', 5.6),
-    ('glcm_SumSquares', 66049.5)
-  ];
-
-  // GLRLM 特征
-  const glrlm_features = [
-    ('glrlm_ShortRunEmphasis', 0.15),
-    ('glrlm_LongRunEmphasis', 0.85),
-    ('glrlm_GrayLevelNonUniformity', 0.23),
-    ('glrlm_RunLengthNonUniformity', 0.45),
-    ('glrlm_RunPercentage', 0.62),
-    ('glrlm_LowGrayLevelRunEmphasis', 0.35),
-    ('glrlm_HighGrayLevelRunEmphasis', 0.65),
-    ('glrlm_ShortRunLowGrayLevelEmphasis', 0.05),
-    ('glrlm_ShortRunHighGrayLevelEmphasis', 0.10),
-    ('glrlm_LongRunLowGrayLevelEmphasis', 0.30),
-    ('glrlm_LongRunHighGrayLevelEmphasis', 0.55)
-  ];
-
-  // GLSZM 特征
-  const glszm_features = [
-    ('glszm_SmallAreaEmphasis', 0.22),
-    ('glszm_LargeAreaEmphasis', 0.78),
-    ('glszm_GrayLevelNonUniformity', 0.18),
-    ('glszm_SizeZoneNonUniformity', 0.35),
-    ('glszm_ZonePercentage', 0.48),
-    ('glszm_LowGrayLevelZoneEmphasis', 0.32),
-    ('glszm_HighGrayLevelZoneEmphasis', 0.68),
-    ('glszm_SmallAreaLowGrayLevelEmphasis', 0.07),
-    ('glszm_SmallAreaHighGrayLevelEmphasis', 0.15),
-    ('glszm_LargeAreaLowGrayLevelEmphasis', 0.25),
-    ('glszm_LargeAreaHighGrayLevelEmphasis', 0.53)
-  ];
-
-  // GLDM 特征
-  const gldm_features = [
-    ('gldm_SmallDependenceEmphasis', 0.18),
-    ('gldm_LargeDependenceEmphasis', 0.82),
-    ('gldm_GrayLevelNonUniformity', 0.21),
-    ('gldm_DependenceDistanceNonUniformity', 0.42),
-    ('gldm_DependencePercentage', 0.55),
-    ('gldm_LowGrayLevelDependenceEmphasis', 0.38),
-    ('gldm_HighGrayLevelDependenceEmphasis', 0.62),
-    ('gldm_SmallDependenceLowGrayLevelEmphasis', 0.06),
-    ('gldm_SmallDependenceHighGrayLevelEmphasis', 0.12),
-    ('gldm_LargeDependenceLowGrayLevelEmphasis', 0.32),
-    ('gldm_LargeDependenceHighGrayLevelEmphasis', 0.50),
-    ('gldm_DependenceVariance', 125.6),
-    ('gldm_DependenceEntropy', 4.2)
-  ];
-
-  // NGTDM 特征
-  const ngtdm_features = [
-    ('ngtdm_Coarseness', 0.08),
-    ('ngtdm_Contrast', 125.6),
-    ('ngtdm_Busyness', 0.45),
-    ('ngtdm_Complexity', 0.78),
-    ('ngtdm_Strength', 0.32)
-  ];
-
-  for (const [name, value] of [...shape_features, ...firstorder_features, ...glcm_features, ...glrlm_features, ...glszm_features, ...gldm_features, ...ngtdm_features]) {
-    features[name] = value;
-  }
-
-  return features;
-};
-
 export default {
   name: 'MLWorkspace',
   setup() {
+    // CSV值转义：包含逗号、引号或换行符时用双引号包裹
+    const quoteCsvValue = (val) => {
+      const s = String(val ?? '');
+      if (s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r')) {
+        return '"' + s.replace(/"/g, '""') + '"';
+      }
+      return s;
+    };
+
+    // 正确解析一行CSV（处理引号内的逗号）
+    const parseCsvLine = (line) => {
+      const result = [];
+      let current = '';
+      let inQuotes = false;
+      for (let i = 0; i < line.length; i++) {
+        const char = line[i];
+        if (char === '"') {
+          if (inQuotes && i + 1 < line.length && line[i + 1] === '"') {
+            current += '"';
+            i++;
+          } else {
+            inQuotes = !inQuotes;
+          }
+        } else if (char === ',' && !inQuotes) {
+          result.push(current.trim());
+          current = '';
+        } else {
+          current += char;
+        }
+      }
+      result.push(current.trim());
+      return result;
+    };
+
     const imageInput = ref(null);
     const roiInput = ref(null);
     const folderInput = ref(null);
@@ -874,6 +674,8 @@ export default {
     const uploadMode = ref('files'); // 'files' or 'folder'
     const folderFiles = ref([]);
     const niiFiles = ref([]); // 存储所有NII文件
+    const patientId = ref('');
+    const patientLabel = ref('');
     const imageFile = ref(null);
     const roiFile = ref(null);
     const features = ref(null);
@@ -881,7 +683,6 @@ export default {
     const loading = ref(false);
     const loadingMessage = ref('');
     const error = ref(null);
-    const activeTab = ref('shape');
     const backendStatus = ref(null);
     const isChecking = ref(false);
 
@@ -896,6 +697,7 @@ export default {
     const showRoiSelector = ref(false);
     const selectedImageIndex = ref('');
     const selectedRoiIndex = ref('');
+    const showNiiFileList = ref(true);
 
     // 数据集划分
     const splitCsvFile = ref(null);
@@ -930,24 +732,71 @@ export default {
     const rocCanvas = ref(null);
 
     const featureCategories = ref({
-      "shape": "形状特征 - 描述ROI的几何形状（体积、表面积、球形度、偏心度等）",
+      "shape": "形状特征 - 描述ROI的几何形状（体积、表面积、球形度等）",
       "firstorder": "一阶统计特征 - 描述图像强度分布（均值、方差、偏度、峰度等）",
-      "glcm": "灰度共生矩阵 - 描述纹理特征（对比度、相关性、能量、熵等）",
-      "glrlm": "灰度行程长度矩阵 - 描述连续相同灰度级的行程长度分布",
-      "glszm": "灰度大小区域矩阵 - 描述相同灰度级区域的大小分布",
-      "gldm": "灰度依赖矩阵 - 描述灰度级之间的依赖关系",
-      "ngtdm": "邻域灰度差矩阵 - 描述中心像素与邻域像素的灰度差异"
+      "glcm": "灰度共生矩阵 - 4方向GLCM纹理特征（对比度、相关性、同质性、能量等）"
     });
 
-    const featureTabs = [
-      { key: 'shape', label: '形状特征' },
-      { key: 'firstorder', label: '一阶统计' },
-      { key: 'glcm', label: '灰度共生矩阵' },
-      { key: 'glrlm', label: '灰度行程' },
-      { key: 'glszm', label: '灰度区域' },
-      { key: 'gldm', label: '灰度依赖' },
-      { key: 'ngtdm', label: '邻域灰度差' }
-    ];
+    const detectedPatients = ref([]);
+    const detectedLabelMap = ref({});
+    const selectedPatientIndex = ref(-1);
+    const selectedPatientIndices = ref([]);
+    const activeNavSection = ref('nii-upload');
+
+    const allPatientsSelected = computed(() => {
+      const patients = detectedPatients.value;
+      return patients.length > 0 && selectedPatientIndices.value.length === patients.length;
+    });
+
+    const toggleSelectAllPatients = () => {
+      if (allPatientsSelected.value) {
+        selectedPatientIndices.value = [];
+      } else {
+        selectedPatientIndices.value = detectedPatients.value.map((_, i) => i);
+      }
+    };
+
+    const togglePatientSelect = (idx) => {
+      const arr = selectedPatientIndices.value;
+      const pos = arr.indexOf(idx);
+      if (pos >= 0) {
+        arr.splice(pos, 1);
+      } else {
+        arr.push(idx);
+      }
+    };
+
+    // 导航平滑滚动
+    const scrollTo = (id) => {
+      const el = document.getElementById(id);
+      if (el) {
+        const navHeight = 70;
+        const top = el.getBoundingClientRect().top + window.pageYOffset - navHeight - 20;
+        window.scrollTo({ top, behavior: 'smooth' });
+      }
+    };
+
+    const updateActiveNav = () => {
+      const sections = ['nii-upload', 'feature-info', 'csv-normalize', 'dataset-split', 'svm-train', 'lesion-detect'];
+      const scrollPos = window.scrollY + 120;
+      let active = sections[0];
+      for (const id of sections) {
+        const el = document.getElementById(id);
+        if (el && el.offsetTop <= scrollPos) {
+          active = id;
+        }
+      }
+      activeNavSection.value = active;
+    };
+
+    onMounted(() => {
+      window.addEventListener('scroll', updateActiveNav, { passive: true });
+    });
+
+    onUnmounted(() => {
+      window.removeEventListener('scroll', updateActiveNav);
+    });
+
 
     // 检测后端服务
     const checkBackend = async () => {
@@ -990,91 +839,261 @@ export default {
       processFolderFiles(files);
     };
 
-    // 处理文件夹文件
+    // 处理文件夹文件 — 解析目录结构提取患者信息和标签
     const processFolderFiles = (files) => {
       folderFiles.value = files;
       error.value = null;
 
-      // 自动识别 lung 和 ROI 文件
       const foundNiiFiles = files.filter(f => f.name.endsWith('.nii') || f.name.endsWith('.nii.gz'));
-      niiFiles.value = foundNiiFiles; // 保存到响应式变量供模板使用
+      niiFiles.value = foundNiiFiles;
 
       if (foundNiiFiles.length === 0) {
         imageFile.value = null;
         roiFile.value = null;
+        detectedPatients.value = [];
         return;
       }
 
-      // 增加更多可能的关键词模式
-      const lungPatterns = ['lung', 'image', 'ct', 'scan', 'volume', 'img', 'original', 'tissue', 'chest'];
-      const roiPatterns = ['roi', 'mask', 'label', 'segmentation', 'seg', 'mask_roi', 'roi_mask', 'annotation', 'region'];
+      // 解析目录结构: ... / label_folder / patient_folder / file.nii
+      // webkitRelativePath 是相对于选中文件夹的路径
+      const patientMap = {};
+      const labelFolderNames = new Set();
+      const allLabelCandidates = [];
 
-      // 识别肺部影像文件（包含lung关键词且不包含roi关键词）
-      const lungFile = foundNiiFiles.find(f =>
-        lungPatterns.some(p => f.name.toLowerCase().includes(p)) &&
-        !roiPatterns.some(p => f.name.toLowerCase().includes(p))
-      );
+      for (const f of foundNiiFiles) {
+        const relPath = f.webkitRelativePath || f.name;
+        const parts = relPath.replace(/\\/g, '/').split('/').filter(p => p && p !== '.');
 
-      // 识别ROI文件（包含roi相关关键词）
-      const foundRoiFile = foundNiiFiles.find(f =>
-        roiPatterns.some(p => f.name.toLowerCase().includes(p))
-      );
+        let patientKey, patientId, labelFolder;
+        const n = parts.length;
 
-      // 如果通过关键词找到lung文件
-      if (lungFile) {
-        imageFile.value = lungFile;
-      } else {
-        // 如果没找到，使用不包含ROI关键词的第一个文件作为影像
-        const nonRoiFile = foundNiiFiles.find(f => !roiPatterns.some(p => f.name.toLowerCase().includes(p)));
-        if (nonRoiFile) {
-          imageFile.value = nonRoiFile;
-        } else if (foundNiiFiles.length >= 1) {
-          imageFile.value = foundNiiFiles[0];
-        } else {
-          imageFile.value = null;
-        }
-      }
-
-      // 如果通过关键词找到ROI文件
-      if (foundRoiFile) {
-        roiFile.value = foundRoiFile;
-      } else {
-        // 如果没找到，使用不是影像的文件作为ROI
-        if (imageFile.value && foundNiiFiles.length >= 2) {
-          const idx = foundNiiFiles.indexOf(imageFile.value);
-          // 尝试找另一个文件作为ROI
-          for (let i = 0; i < foundNiiFiles.length; i++) {
-            if (i !== idx) {
-              roiFile.value = foundNiiFiles[i];
-              break;
-            }
+        if (n >= 3) {
+          // 倒数第3层 = label, 倒数第2层 = patient, 最后 = filename
+          labelFolder = parts[n - 3];
+          patientId = parts[n - 2];
+          patientKey = labelFolder + '/' + patientId;
+        } else if (n === 2) {
+          // 2层: 可能是 label/file.nii 或 patient/file.nii
+          const first = parts[0];
+          if (/^[01]$/.test(first) || first.length <= 3) {
+            // 短名称 → 可能是 label 文件夹
+            labelFolder = first;
+            patientId = first + '_patient';  // 没有真实患者ID，用label代替
+            patientKey = labelFolder + '/' + patientId;
+          } else {
+            // 长名称 → 可能是 patient 文件夹，但没有 label 信息
+            labelFolder = '__nested__';
+            patientId = first;
+            patientKey = patientId;
           }
-        } else if (foundNiiFiles.length >= 2) {
-          // 如果没有识别到影像，使用第二个文件作为ROI
-          roiFile.value = foundNiiFiles[1];
-        } else if (foundNiiFiles.length === 1) {
-          // 如果只有一个文件，也把它设为ROI（用户可能只有一个文件包含两者）
-          roiFile.value = foundNiiFiles[0];
         } else {
-          roiFile.value = null;
+          // 只有文件名，无法解析
+          patientKey = f.name;
+          patientId = f.name.replace(/\.(nii|nii\.gz)$/i, '');
+          labelFolder = '__single__';
+        }
+
+        labelFolderNames.add(labelFolder);
+        allLabelCandidates.push(labelFolder);
+
+        if (!patientMap[patientKey]) {
+          patientMap[patientKey] = { label: labelFolder, patientId, lung: null, roi: null };
+        }
+
+        const lungPatterns = ['lung', 'image', 'ct', 'scan', 'volume', 'img', 'original', 'tissue', 'chest'];
+        const roiPatterns = ['roi', 'mask', 'label', 'segmentation', 'seg', 'mask_roi', 'roi_mask', 'annotation', 'region'];
+        const fname = f.name.toLowerCase();
+        const isLung = lungPatterns.some(p => fname.includes(p)) && !roiPatterns.some(p => fname.includes(p));
+        const isRoi = roiPatterns.some(p => fname.includes(p));
+
+        if (isLung || (!isRoi && !patientMap[patientKey].lung)) {
+          if (!patientMap[patientKey].lung) patientMap[patientKey].lung = f;
+        }
+        if (isRoi || (!isLung && patientMap[patientKey].lung && !patientMap[patientKey].roi)) {
+          if (!patientMap[patientKey].roi || isRoi) patientMap[patientKey].roi = f;
         }
       }
 
-      // 重置选择器状态
+      // 确保每个患者都有 roi（回退策略）
+      for (const key of Object.keys(patientMap)) {
+        const p = patientMap[key];
+        if (!p.roi && p.lung) {
+          const patientFiles = foundNiiFiles.filter(f => {
+            const rp = (f.webkitRelativePath || f.name).replace(/\\/g, '/');
+            return rp.includes(p.patientId);
+          });
+          const altRoi = patientFiles.find(f => f !== p.lung);
+          if (altRoi) p.roi = altRoi;
+        }
+      }
+
+      // 转换为数组
+      const patients = Object.values(patientMap);
+      detectedPatients.value = patients;
+      selectedPatientIndices.value = [];
+
+      // 标签文件夹名称 → 标签映射 (输出0或1)
+      const labelMap = {};
+      const realFolders = [...labelFolderNames].filter(n => !n.startsWith('__'));
+      if (realFolders.length === 2) {
+        const sorted = realFolders.sort();
+        labelMap[sorted[0]] = '0';
+        labelMap[sorted[1]] = '1';
+      } else {
+        for (const name of realFolders) {
+          const lower = name.toLowerCase();
+          if (name === '0' || lower === 'malignant' || name.includes('恶')) {
+            labelMap[name] = '0';
+          } else if (name === '1' || lower === 'benign' || name.includes('良')) {
+            labelMap[name] = '1';
+          } else {
+            labelMap[name] = name;
+          }
+        }
+      }
+      // 内部标记回退
+      if (labelFolderNames.has('__nested__')) labelMap['__nested__'] = '未知';
+      if (labelFolderNames.has('__single__')) labelMap['__single__'] = '未知';
+      detectedLabelMap.value = labelMap;
+
+      // 单患者: 自动填充
+      if (patients.length === 1) {
+        const p = patients[0];
+        imageFile.value = p.lung;
+        roiFile.value = p.roi;
+        // 如果 patientId 是合成的（如 '1_patient'），只用 label 信息
+        patientId.value = p.patientId.endsWith('_patient') ? '' : p.patientId;
+        patientLabel.value = labelMap[p.label] || p.label;
+        console.log('检测到单患者:', { patientId: p.patientId, labelFolder: p.label, mapped: patientLabel.value });
+      } else if (patients.length > 1) {
+        console.log('检测到多患者:', patients.length, patients.map(p => `${p.patientId}[${p.label}]`));
+        imageFile.value = null;
+        roiFile.value = null;
+        patientId.value = '';
+        patientLabel.value = '';
+      }
+
+      // 重置选择器
       showImageSelector.value = false;
       showRoiSelector.value = false;
       selectedImageIndex.value = '';
       selectedRoiIndex.value = '';
 
-      // 调试信息
       console.log('NII文件列表:', foundNiiFiles.map(f => f.name));
-      console.log('识别到的影像文件:', imageFile.value?.name || '未找到');
-      console.log('识别到的ROI文件:', roiFile.value?.name || '未找到');
+      console.log('识别到的患者:', patients.map(p => `${p.patientId} [${p.label}]`));
+    };
 
-      // 默认预览第一个文件
-      if (foundNiiFiles.length > 0) {
-        selectedPreviewFileIndex.value = '0';
-        previewSelectedFile();
+    // 选中某个患者
+    const selectBatchPatient = (idx) => {
+      selectedPatientIndex.value = idx;
+    };
+
+    // 使用选中的患者填充并提取特征
+    const useSelectedPatient = async () => {
+      const p = detectedPatients.value[selectedPatientIndex.value];
+      if (!p) return;
+      imageFile.value = p.lung;
+      roiFile.value = p.roi;
+      patientId.value = p.patientId;
+      patientLabel.value = detectedLabelMap.value[p.label] || p.label;
+      console.log('选中患者:', { patientId: p.patientId, label: patientLabel.value });
+      await extractFeatures();
+    };
+
+    // 批量提取患者特征（优先使用勾选的患者，无勾选时提取全部）
+    const batchExtractAllPatients = async () => {
+      const allPatients = detectedPatients.value;
+      if (allPatients.length === 0) return;
+
+      const selectedIndices = selectedPatientIndices.value;
+      const targets = selectedIndices.length > 0
+        ? selectedIndices.map(i => allPatients[i])
+        : allPatients;
+
+      isExtracting.value = true;
+      loading.value = true;
+      loadingMessage.value = `正在批量提取 ${targets.length} 个患者的特征...`;
+      error.value = null;
+
+      try {
+        const allResults = [];
+        const allErrors = [];
+
+        for (let i = 0; i < targets.length; i++) {
+          const p = targets[i];
+          if (!p.lung || !p.roi) {
+            allErrors.push(`${p.patientId}: 缺少lung或ROI文件`);
+            continue;
+          }
+
+          loadingMessage.value = `正在处理 ${i + 1}/${targets.length}: ${p.patientId}...`;
+
+          const formData = new FormData();
+          formData.append('image_file', p.lung);
+          formData.append('roi_file', p.roi);
+          formData.append('patient_id', p.patientId);
+          formData.append('label', detectedLabelMap.value[p.label] || p.label);
+
+          try {
+            const response = await fetch(`${API_BASE}/extract-features/`, {
+              method: 'POST',
+              body: formData
+            });
+
+            if (response.ok) {
+              const data = await response.json();
+              allResults.push(data.features);
+            } else {
+              const errData = await response.json();
+              allErrors.push(`${p.patientId}: ${errData.detail || '提取失败'}`);
+            }
+          } catch (e) {
+            allErrors.push(`${p.patientId}: ${e.message}`);
+          }
+        }
+
+        if (allResults.length > 0) {
+          // 合并所有结果并导出CSV
+          const allFeatureKeys = new Set();
+          for (const r of allResults) {
+            for (const k of Object.keys(r)) {
+              if (k !== 'sample' && k !== 'label') allFeatureKeys.add(k);
+            }
+          }
+          const featureKeys = [...allFeatureKeys];
+
+          const csvHeaders = ['sample', 'label', ...featureKeys].map(quoteCsvValue).join(',');
+          const csvRows = allResults.map(r => {
+            const row = [String(r.sample || ''), String(r.label || '')];
+            for (const k of featureKeys) {
+              const v = r[k];
+              row.push(typeof v === 'number' ? v.toFixed(6) : String(v ?? ''));
+            }
+            return row.map(quoteCsvValue).join(',');
+          });
+
+          const csvContent = [csvHeaders, ...csvRows].join('\n');
+          const blob = new Blob(['﻿' + csvContent], { type: 'text/csv;charset=utf-8;' });
+          const link = document.createElement('a');
+          link.href = URL.createObjectURL(blob);
+          const now = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
+          link.download = `radiomics_batch_${allResults.length}patients_${now}.csv`;
+          link.click();
+
+          loadingMessage.value = `完成! 成功提取 ${allResults.length} 个患者，${allErrors.length} 个失败`;
+        } else {
+          loadingMessage.value = '所有患者提取均失败';
+        }
+
+        if (allErrors.length > 0) {
+          console.error('批量提取错误:', allErrors);
+        }
+      } catch (err) {
+        error.value = err.message;
+        console.error('批量提取失败:', err);
+      } finally {
+        isExtracting.value = false;
+        loading.value = false;
       }
     };
 
@@ -1248,6 +1267,8 @@ export default {
           const formData = new FormData();
           formData.append('image_file', imageFile.value);
           formData.append('roi_file', roiFile.value);
+          if (patientId.value) formData.append('patient_id', patientId.value);
+          if (patientLabel.value) formData.append('label', patientLabel.value);
 
           const response = await fetch(`${API_BASE}/extract-features/`, {
             method: 'POST',
@@ -1269,7 +1290,7 @@ export default {
           features.value = {
             status: 'success',
             features: mockFeatures,
-            feature_count: Object.keys(mockFeatures).length,
+            feature_count: Object.keys(mockFeatures).filter(k => k !== 'sample' && k !== 'label').length,
             is_real: false,
             has_pyradiomics: false
           };
@@ -1283,57 +1304,6 @@ export default {
       }
     };
 
-    const filteredFeatures = computed(() => {
-      if (!features.value || !features.value.features || typeof features.value.features !== 'object') {
-        return {};
-      }
-
-      const prefix = activeTab.value;
-      const featuresObj = features.value.features;
-
-      if (Array.isArray(featuresObj)) {
-        return {};
-      }
-
-      return Object.fromEntries(
-        Object.entries(featuresObj).filter(([key]) =>
-          key.startsWith(prefix)
-        )
-      );
-    });
-
-    const getFeatureCountByCategory = (category) => {
-      if (!features.value || !features.value.features || typeof features.value.features !== 'object' || Array.isArray(features.value.features)) {
-        return 0;
-      }
-      return Object.keys(features.value.features).filter(
-        key => key.startsWith(category)
-      ).length;
-    };
-
-    const formatFeatureName = (key) => {
-      const parts = key.split('_');
-      if (parts.length > 1) {
-        const category = parts[0];
-        const name = parts.slice(1).join(' ');
-        return `${getCategoryLabel(category)}: ${name}`;
-      }
-      return key;
-    };
-
-    const getCategoryLabel = (category) => {
-      const labels = {
-        'shape': '形状',
-        'firstorder': '一阶',
-        'glcm': 'GLCM',
-        'glrlm': 'GLRLM',
-        'glszm': 'GLSZM',
-        'gldm': 'GLDM',
-        'ngtdm': 'NGTDM'
-      };
-      return labels[category] || category;
-    };
-
     const getCategoryIcon = (category) => {
       const icons = {
         'shape': '📐',
@@ -1345,36 +1315,6 @@ export default {
         'ngtdm': '🔄'
       };
       return icons[category] || '📝';
-    };
-
-    const downloadFeatures = () => {
-      if (!features.value?.features) return;
-
-      const headers = ['特征名称', '数值'];
-      const rows = Object.entries(features.value.features).map(([key, value]) => [
-        key,
-        typeof value === 'number' ? value.toFixed(6) : value
-      ]);
-
-      const csvContent = [headers, ...rows].map(row => row.join(',')).join('\n');
-      const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
-
-      const link = document.createElement('a');
-      link.href = URL.createObjectURL(blob);
-      link.download = 'radiomics_features.csv';
-      link.click();
-    };
-
-    const downloadFeaturesJson = () => {
-      if (!features.value?.features) return;
-
-      const jsonContent = JSON.stringify(features.value.features, null, 2);
-      const blob = new Blob([jsonContent], { type: 'application/json' });
-
-      const link = document.createElement('a');
-      link.href = URL.createObjectURL(blob);
-      link.download = 'radiomics_features.json';
-      link.click();
     };
 
     const resetWorkspace = () => {
@@ -1412,9 +1352,9 @@ export default {
 
       try {
         const text = await file.text();
-        const lines = text.trim().split('\n');
-        const headers = lines[0].split(',');
-        const data = lines.slice(1).map(line => line.split(','));
+        const lines = text.trim().split('\n').filter(l => l.trim());
+        const headers = parseCsvLine(lines[0]);
+        const data = lines.slice(1).map(line => parseCsvLine(line)).filter(r => r.length === headers.length);
 
         for (let i = data.length - 1; i > 0; i--) {
           const j = Math.floor(Math.random() * (i + 1));
@@ -1456,7 +1396,7 @@ export default {
     };
 
     const downloadCsv = (data, filename) => {
-      const csv = data.map(row => row.join(',')).join('\n');
+      const csv = data.map(row => row.map(quoteCsvValue).join(',')).join('\n');
       const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
       const link = document.createElement('a');
       const url = URL.createObjectURL(blob);
@@ -1494,28 +1434,7 @@ export default {
 
       try {
         const text = await file.text();
-        const lines = text.trim().split('\n');
-
-        const parseCsvLine = (line) => {
-          const result = [];
-          let current = '';
-          let inQuotes = false;
-
-          for (let i = 0; i < line.length; i++) {
-            const char = line[i];
-
-            if (char === '"') {
-              inQuotes = !inQuotes;
-            } else if (char === ',' && !inQuotes) {
-              result.push(current.trim());
-              current = '';
-            } else {
-              current += char;
-            }
-          }
-          result.push(current.trim());
-          return result;
-        };
+        const lines = text.trim().split('\n').filter(l => l.trim());
 
         const headers = parseCsvLine(lines[0]);
         const data = lines.slice(1).map(line => {
@@ -1665,24 +1584,13 @@ export default {
     };
 
     const drawRocCurve = () => {
-      console.log('drawRocCurve called');
-      if (!rocCanvas.value) {
-        console.log('rocCanvas is null');
-        return;
-      }
-      if (!svmResult.value) {
-        console.log('svmResult is null');
-        return;
-      }
-      if (!svmResult.value.roc_data) {
-        console.log('roc_data is null');
-        return;
-      }
+      if (!rocCanvas.value || !svmResult.value?.roc_data) return;
 
       const canvas = rocCanvas.value;
       const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
       const { fpr, tpr } = svmResult.value.roc_data;
-      console.log('ROC data:', fpr, tpr);
 
       if (!fpr || !tpr || fpr.length === 0 || tpr.length === 0) {
         console.log('ROC data is empty');
@@ -1823,8 +1731,14 @@ export default {
 
         svmResult.value = result;
 
-        await nextTick();
-        drawRocCurve();
+        // 等待DOM渲染完成后绘制ROC曲线
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              drawRocCurve();
+            });
+          });
+        });
 
         setTimeout(() => {
           svmProgressValue.value = 0;
@@ -1892,56 +1806,51 @@ export default {
     const overlayHeight = ref(0);
 
     // 病灶标记计算属性
-    const lesionCircleX = computed(() => {
-      // 优先使用 predictResult 的病灶位置，其次使用 niiPreview 的
-      let lesionPos = predictResult?.lesion_position || niiPreview?.lesion_info;
-      if (!lesionPos || !niiPreview) return 0;
+    const lesionContourPath = computed(() => {
+      const lesionPos = predictResult.value?.lesion_position;
+      if (!lesionPos || !lesionPos.contour_points || lesionPos.contour_points.length === 0) return '';
 
-      // 获取原始坐标和缩放信息
-      const originalX = lesionPos.x;
-      const originalWidth = lesionPos.original_width;
-      const displayWidth = niiPreview.width;
+      const originalWidth = lesionPos.original_width || 512;
+      const originalHeight = lesionPos.original_height || 512;
+      const displayWidth = niiPreview.value?.width || overlayWidth.value || 512;
+      const displayHeight = niiPreview.value?.height || overlayHeight.value || 512;
+      const scaleX = displayWidth / originalWidth;
+      const scaleY = displayHeight / originalHeight;
 
-      // 计算比例：先将原始坐标归一化，再根据显示尺寸缩放
-      const normalizedX = originalX / originalWidth;
-      const x = normalizedX * displayWidth;
+      const points = lesionPos.contour_points[0];
+      if (!points || points.length < 3) return '';
 
-      return Math.max(30, Math.min(displayWidth - 30, x));
+      const scaled = points.map(p => `${(p[0] * scaleX).toFixed(1)},${(p[1] * scaleY).toFixed(1)}`);
+      return 'M ' + scaled.join(' L ') + ' Z';
     });
 
-    const lesionCircleY = computed(() => {
-      // 优先使用 predictResult 的病灶位置，其次使用 niiPreview 的
-      let lesionPos = predictResult?.lesion_position || niiPreview?.lesion_info;
-      if (!lesionPos || !niiPreview) return 0;
+    const lesionBBox = computed(() => {
+      const lesionPos = predictResult.value?.lesion_position;
+      if (!lesionPos || !lesionPos.bounding_box) return null;
 
-      // 获取原始坐标和缩放信息
-      const originalY = lesionPos.y;
-      const originalHeight = lesionPos.original_height;
-      const displayHeight = niiPreview.height;
+      const bb = lesionPos.bounding_box;
+      const originalWidth = lesionPos.original_width || 512;
+      const originalHeight = lesionPos.original_height || 512;
+      const displayWidth = niiPreview.value?.width || overlayWidth.value || 512;
+      const displayHeight = niiPreview.value?.height || overlayHeight.value || 512;
+      const scaleX = displayWidth / originalWidth;
+      const scaleY = displayHeight / originalHeight;
 
-      // 计算比例：先将原始坐标归一化，再根据显示尺寸缩放
-      const normalizedY = originalY / originalHeight;
-      const y = normalizedY * displayHeight;
-
-      return Math.max(30, Math.min(displayHeight - 30, y));
-    });
-
-    const lesionCircleRadius = computed(() => {
-      const maxRadius = Math.min(overlayWidth.value, overlayHeight.value) * 0.2;
-      return Math.min(40, maxRadius);
+      return {
+        x: bb.x_min * scaleX,
+        y: bb.y_min * scaleY,
+        width: (bb.x_max - bb.x_min) * scaleX,
+        height: (bb.y_max - bb.y_min) * scaleY
+      };
     });
 
     // 判断是否有病灶的计算属性
     const hasLesion = computed(() => {
-      // 简化逻辑：只要有病灶位置信息就显示圈
-      const hasLesionPos = !!(predictResult?.lesion_position || niiPreview?.lesion_info);
-
-      console.log('hasLesion 计算:');
-      console.log('  predictResult:', predictResult.value);
-      console.log('  niiPreview:', niiPreview.value);
-      console.log('  hasLesionPos:', hasLesionPos);
-
-      return hasLesionPos;  // 简化：只要有位置就显示
+      const lesionPos = predictResult.value?.lesion_position;
+      if (!lesionPos) return false;
+      if (lesionPos.found === false) return false;
+      if (lesionPos.area_pixels !== undefined && lesionPos.area_pixels < 10) return false;
+      return true;
     });
 
     // 图片加载完成后更新覆盖层尺寸
@@ -1974,11 +1883,6 @@ export default {
         niiImageLoaded.value = true;
         niiSessionId.value = null; // 清除旧的session
         niiPreview.value = null; // 清除旧预览
-
-        // 同时更新3D可视化状态
-        threeDNiiFileName.value = file.name;
-        threeDNiiLoaded.value = true;
-        threeDResult.value = null; // 清除旧的3D结果
 
         // 上传后立即预览
         console.log('📤 开始加载NII预览:', file.name);
@@ -2160,145 +2064,6 @@ export default {
       }
     };
 
-    // ==================== 3D可视化相关变量 ====================
-    const threeDNiiFile = ref(null);
-    const threeDNiiFileName = ref('');
-    const threeDNiiLoaded = ref(false);
-    const threeDResult = ref(null);
-    const isDetecting3D = ref(false);
-    const current3DSliceIndex = ref(0);
-    const overlayWidth3D = ref(400);
-    const overlayHeight3D = ref(400);
-    const lesionRadius3D = ref(30);
-    const threeDSessionId = ref(null);
-    const pointCloudRef = ref(null);
-
-    const current3DSlice = computed(() => {
-      if (!threeDResult.value || !threeDResult.value.preview_slices) return null;
-      return threeDResult.value.preview_slices[current3DSliceIndex.value];
-    });
-
-    const handleThreeDNiiSelect = (event) => {
-      const file = event.target.files[0];
-      if (file) {
-        threeDNiiFileName.value = file.name;
-        threeDNiiLoaded.value = true;
-        threeDResult.value = null;
-        threeDSessionId.value = null;
-      }
-    };
-
-    const detect3DLesions = async () => {
-      // 优先使用上面选择的NII文件和session
-      const file = niiImageObj.value;
-      const session = niiSessionId.value || threeDSessionId.value;
-
-      if (!file && !session) {
-        error.value = '请先在上方上传NII文件';
-        return;
-      }
-
-      isDetecting3D.value = true;
-      try {
-        const formData = new FormData();
-
-        if (session) {
-          formData.append('session_id', session);
-        } else if (file) {
-          formData.append('nii_file', file);
-        }
-
-        const response = await fetch(`${API_BASE}/detect-3d-lesions/`, {
-          method: 'POST',
-          body: formData
-        });
-
-        if (!response.ok) {
-          const errData = await response.json();
-          throw new Error(errData.detail || '检测失败');
-        }
-
-        const result = await response.json();
-        threeDResult.value = result;
-        current3DSliceIndex.value = 0;
-
-        if (result.session_id) {
-          threeDSessionId.value = result.session_id;
-        }
-
-        // 等待DOM更新后计算覆盖层大小
-        await nextTick();
-        update3DOverlaySize();
-      } catch (err) {
-        error.value = '3D检测失败: ' + err.message;
-      } finally {
-        isDetecting3D.value = false;
-      }
-    };
-
-    const prev3DSlice = () => {
-      if (current3DSliceIndex.value > 0) {
-        current3DSliceIndex.value--;
-        update3DOverlaySize();
-      }
-    };
-
-    const next3DSlice = () => {
-      if (threeDResult.value && current3DSliceIndex.value < threeDResult.value.preview_slices.length - 1) {
-        current3DSliceIndex.value++;
-        update3DOverlaySize();
-      }
-    };
-
-    const update3DOverlaySize = () => {
-      const slice = current3DSlice.value;
-      if (!slice) return;
-
-      const img = new Image();
-      img.onload = () => {
-        const maxSize = 400;
-        let w = img.width;
-        let h = img.height;
-
-        if (w > h) {
-          h = Math.round(h * (maxSize / w));
-          w = maxSize;
-        } else {
-          w = Math.round(w * (maxSize / h));
-          h = maxSize;
-        }
-
-        overlayWidth3D.value = w;
-        overlayHeight3D.value = h;
-        lesionRadius3D.value = Math.max(15, Math.min(w, h) / 10);
-      };
-      img.src = slice.image;
-    };
-
-    const getScaledCoord = (origCoord, origSize, targetSize) => {
-      return (origCoord / origSize) * targetSize;
-    };
-
-    const getLesionPointStyle = (lesion) => {
-      if (!threeDResult.value) return {};
-      const shape = threeDResult.value.image_shape;
-      // 计算在点云视图中的位置（简化的3D到2D投影）
-      const x = (lesion.x / shape[2]) * 100;
-      const y = (lesion.y / shape[1]) * 100;
-      const z = (lesion.slice_index / shape[0]) * 100;
-
-      // 简单的等距投影
-      const screenX = 50 + (x - z) * 0.4;
-      const screenY = 50 + (x + z) * 0.2 - y * 0.3;
-
-      return {
-        left: `${screenX}%`,
-        top: `${screenY}%`,
-        opacity: 0.3 + (z / 100) * 0.7,
-        transform: `scale(${0.5 + (z / 100) * 0.5})`
-      };
-    };
-
     // 页面关闭/刷新时清理
     const handleBeforeUnload = (e) => {
       // 尝试发送清理请求（使用 sendBeacon 提高成功率）
@@ -2331,6 +2096,20 @@ export default {
       uploadMode,
       folderFiles,
       niiFiles,
+      patientId,
+      patientLabel,
+      detectedPatients,
+      detectedLabelMap,
+      selectedPatientIndex,
+      selectedPatientIndices,
+      activeNavSection,
+      scrollTo,
+      allPatientsSelected,
+      toggleSelectAllPatients,
+      togglePatientSelect,
+      selectBatchPatient,
+      useSelectedPatient,
+      batchExtractAllPatients,
       imageFile,
       roiFile,
       features,
@@ -2338,7 +2117,6 @@ export default {
       loading,
       loadingMessage,
       error,
-      activeTab,
       backendStatus,
       isChecking,
       // 特征提取模块的影像预览
@@ -2348,13 +2126,12 @@ export default {
       getPreviewableFiles,
       previewSelectedFile,
       updatePreviewSlice,
+      showNiiFileList,
       showImageSelector,
       showRoiSelector,
       selectedImageIndex,
       selectedRoiIndex,
       featureCategories,
-      featureTabs,
-      filteredFeatures,
       checkBackend,
       handleFolderSelect,
       handleFolderDrop,
@@ -2363,11 +2140,7 @@ export default {
       extractFeatures,
       selectImageFile,
       selectRoiFile,
-      getFeatureCountByCategory,
-      formatFeatureName,
       getCategoryIcon,
-      downloadFeatures,
-      downloadFeaturesJson,
       resetWorkspace,
       // 数据集划分
       splitCsvFile,
@@ -2429,9 +2202,8 @@ export default {
       niiImageRef,
       overlayWidth,
       overlayHeight,
-      lesionCircleX,
-      lesionCircleY,
-      lesionCircleRadius,
+      lesionContourPath,
+      lesionBBox,
       hasLesion,
       onImageLoad,
       handleModelSelect,
@@ -2440,25 +2212,7 @@ export default {
       prevSlice,
       nextSlice,
       onSliceInput,
-      predictLesion,
-      // 3D可视化
-      threeDNiiFile,
-      threeDNiiFileName,
-      threeDNiiLoaded,
-      threeDResult,
-      isDetecting3D,
-      current3DSliceIndex,
-      current3DSlice,
-      overlayWidth3D,
-      overlayHeight3D,
-      lesionRadius3D,
-      pointCloudRef,
-      handleThreeDNiiSelect,
-      detect3DLesions,
-      prev3DSlice,
-      next3DSlice,
-      getScaledCoord,
-      getLesionPointStyle
+      predictLesion
     };
   }
 };
@@ -2468,19 +2222,22 @@ export default {
 .ml-workspace {
   font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
   min-height: 100vh;
-  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+  background: #f0f2f5;
+  background-image:
+    radial-gradient(ellipse at 20% 50%, rgba(102, 126, 234, 0.04) 0%, transparent 50%),
+    radial-gradient(ellipse at 80% 20%, rgba(118, 75, 162, 0.04) 0%, transparent 50%);
   padding: 20px;
 }
 
 .header {
   background: white;
-  border-radius: 12px;
+  border-radius: 16px;
   padding: 20px 30px;
   margin-bottom: 20px;
   display: flex;
   justify-content: space-between;
   align-items: center;
-  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.06);
 }
 
 .header h1 {
@@ -2531,33 +2288,141 @@ export default {
   cursor: not-allowed;
 }
 
+/* 顶部导航栏 */
+.top-nav {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: rgba(255, 255, 255, 0.8);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-radius: 14px;
+  padding: 4px;
+  margin-bottom: 20px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.06);
+  border: 1px solid rgba(102, 126, 234, 0.1);
+}
+
+.nav-inner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.nav-link {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 16px;
+  border-radius: 11px;
+  text-decoration: none;
+  color: #555;
+  font-size: 13px;
+  font-weight: 500;
+  transition: all 0.25s ease;
+  white-space: nowrap;
+}
+
+.nav-link:hover {
+  background: rgba(102, 126, 234, 0.08);
+  color: #667eea;
+}
+
+.nav-link.active {
+  background: linear-gradient(135deg, #667eea, #764ba2);
+  color: white;
+  box-shadow: 0 2px 10px rgba(102, 126, 234, 0.3);
+}
+
+.nav-icon {
+  font-size: 15px;
+}
+
+@media (max-width: 768px) {
+  .nav-text {
+    display: none;
+  }
+
+  .nav-link {
+    padding: 10px 12px;
+  }
+}
+
 .main-content {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  max-width: 1100px;
+  margin: 0 auto;
 }
 
+/* 统一卡片样式 */
 .nii-upload-section,
-.features-section,
-.feature-info-section {
-  background: white;
-  border-radius: 12px;
-  padding: 25px;
-  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+.feature-info-section,
+.csv-section,
+.svm-section,
+.predict-section {
+  background: linear-gradient(145deg, #ffffff 0%, #fafbfc 100%);
+  border-radius: 20px;
+  padding: 32px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.06), 0 1px 4px rgba(0, 0, 0, 0.04);
+  border: 1px solid rgba(102, 126, 234, 0.08);
+  transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+  scroll-margin-top: 90px;
+  animation: sectionEnter 0.5s ease-out backwards;
 }
 
-.nii-upload-section {
-  grid-column: 1;
+.nii-upload-section:hover,
+.feature-info-section:hover,
+.csv-section:hover,
+.svm-section:hover,
+.predict-section:hover {
+  box-shadow: 0 8px 32px rgba(102, 126, 234, 0.1), 0 2px 8px rgba(0, 0, 0, 0.06);
+  border-color: rgba(102, 126, 234, 0.2);
 }
 
-.features-section {
-  grid-column: 2;
-  max-height: 650px;
-  overflow-y: auto;
+/* 统一区块标题样式 */
+.nii-upload-section h2,
+.feature-info-section h2,
+.csv-section h2,
+.svm-section h2,
+.predict-section h2 {
+  margin: 0 0 28px 0;
+  font-size: 22px;
+  font-weight: 700;
+  color: #1a1a2e;
+  padding-bottom: 14px;
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
-.feature-info-section {
-  grid-column: 1 / -1;
+.nii-upload-section h2::after,
+.feature-info-section h2::after,
+.csv-section h2::after,
+.svm-section h2::after,
+.predict-section h2::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 60px;
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #667eea, #764ba2);
+}
+
+@keyframes sectionEnter {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 h2 {
@@ -3044,13 +2909,6 @@ h3 {
   color: #856404;
 }
 
-.features-summary {
-  display: flex;
-  justify-content: center;
-  gap: 20px;
-  margin-bottom: 20px;
-}
-
 .summary-card {
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
   color: white;
@@ -3071,84 +2929,6 @@ h3 {
   font-weight: bold;
 }
 
-.features-tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 15px;
-}
-
-.tab-btn {
-  background: #f8f9fa;
-  border: 1px solid #ddd;
-  padding: 8px 15px;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 13px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  transition: all 0.2s;
-}
-
-.tab-btn:hover {
-  background: #e9ecef;
-}
-
-.tab-btn.active {
-  background: #667eea;
-  color: white;
-  border-color: #667eea;
-}
-
-.tab-count {
-  background: rgba(0, 0, 0, 0.1);
-  padding: 2px 8px;
-  border-radius: 10px;
-  font-size: 11px;
-}
-
-.tab-btn.active .tab-count {
-  background: rgba(255, 255, 255, 0.2);
-}
-
-.features-table-wrapper {
-  max-height: 300px;
-  overflow-y: auto;
-  border-radius: 8px;
-  border: 1px solid #ddd;
-}
-
-.features-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 12px;
-}
-
-.features-table th,
-.features-table td {
-  border-bottom: 1px solid #eee;
-  padding: 10px 15px;
-  text-align: left;
-}
-
-.features-table th {
-  background: #667eea;
-  color: white;
-  position: sticky;
-  top: 0;
-}
-
-.features-table tr:hover {
-  background: #f8f9fa;
-}
-
-.features-actions {
-  display: flex;
-  gap: 10px;
-  margin-top: 15px;
-}
-
 .btn-download {
   background: #28a745;
   color: white;
@@ -3162,23 +2942,6 @@ h3 {
 
 .btn-download:hover {
   background: #218838;
-}
-
-.features-placeholder {
-  text-align: center;
-  padding: 60px 20px;
-  color: #999;
-}
-
-.placeholder-icon {
-  font-size: 60px;
-  margin-bottom: 15px;
-}
-
-.placeholder-hint {
-  font-size: 13px;
-  margin-top: 10px;
-  color: #bbb;
 }
 
 .info-cards {
@@ -3261,38 +3024,7 @@ h3 {
   cursor: pointer;
 }
 
-/* CSV模块样式 - 美化版 */
-.csv-section,
-.svm-section {
-  grid-column: 1 / -1;
-  margin-top: 24px;
-  background: white;
-  border-radius: 16px;
-  padding: 28px;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
-  transition: all 0.3s ease;
-}
-
-.csv-section:hover,
-.svm-section:hover {
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.12);
-  transform: translateY(-2px);
-}
-
-.csv-section h2,
-.svm-section h2 {
-  margin: 0 0 24px 0;
-  font-size: 20px;
-  font-weight: 600;
-  color: #1a1a2e;
-  border-bottom: 3px solid transparent;
-  border-image: linear-gradient(135deg, #667eea, #764ba2) 1;
-  padding-bottom: 12px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
+/* CSV/SVM 内部组件样式 */
 .csv-upload-area,
 .svm-upload {
   display: flex;
@@ -3361,6 +3093,7 @@ h3 {
   background: linear-gradient(90deg, #e0e0e0, #f5f5f5);
   outline: none;
   -webkit-appearance: none;
+  appearance: none;
   cursor: pointer;
 }
 
@@ -3412,6 +3145,216 @@ h3 {
   cursor: not-allowed;
   transform: none;
   box-shadow: none;
+}
+
+/* SVM 指标卡片网格 */
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.metric-card {
+  background: linear-gradient(145deg, #f8f9fa, #ffffff);
+  border-radius: 12px;
+  padding: 18px 16px;
+  text-align: center;
+  border: 1px solid #e9ecef;
+  transition: all 0.3s ease;
+}
+
+.metric-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 6px 20px rgba(102, 126, 234, 0.12);
+  border-color: rgba(102, 126, 234, 0.3);
+}
+
+.metric-icon {
+  font-size: 24px;
+  margin-bottom: 6px;
+}
+
+.metric-label {
+  font-size: 12px;
+  color: #888;
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+
+.metric-value {
+  font-size: 22px;
+  font-weight: 700;
+  color: #1a1a2e;
+}
+
+/* 混淆矩阵 */
+.confusion-matrix {
+  margin-top: 20px;
+}
+
+.confusion-matrix h4 {
+  margin: 0 0 12px 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: #1a1a2e;
+}
+
+.matrix-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 16px;
+  background: #f8f9fa;
+  border-radius: 12px;
+}
+
+.matrix-row {
+  display: flex;
+  gap: 4px;
+}
+
+.matrix-cell {
+  width: 80px;
+  height: 60px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  font-weight: 700;
+  border-radius: 8px;
+  color: white;
+}
+.cell-label {
+  font-size: 10px;
+  font-weight: 500;
+  opacity: 0.8;
+  margin-top: 2px;
+}
+
+.matrix-cell.tp {
+  background: linear-gradient(135deg, #43e97b, #38f9d7);
+  color: #1a1a2e;
+}
+
+.matrix-cell.fp {
+  background: linear-gradient(135deg, #f093fb, #f5576c);
+}
+
+.matrix-cell.fn {
+  background: linear-gradient(135deg, #fa709a, #fee140);
+  color: #1a1a2e;
+}
+
+.matrix-cell.tn {
+  background: linear-gradient(135deg, #4facfe, #00f2fe);
+  color: #1a1a2e;
+}
+
+.matrix-labels {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #888;
+  margin-top: 8px;
+}
+
+.matrix-labels span {
+  background: #f0f0f0;
+  padding: 4px 10px;
+  border-radius: 4px;
+}
+
+/* ROC 曲线 */
+.roc-chart {
+  margin-top: 20px;
+}
+
+.roc-chart h4 {
+  margin: 0 0 12px 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: #1a1a2e;
+}
+
+.chart-container {
+  background: #f8f9fa;
+  border-radius: 12px;
+  padding: 16px;
+  display: flex;
+  justify-content: center;
+}
+
+/* 特征重要性热力图 */
+.feature-heatmap {
+  margin-top: 20px;
+}
+
+.feature-heatmap h4 {
+  margin: 0 0 12px 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: #1a1a2e;
+}
+
+.heatmap-container {
+  background: #f8f9fa;
+  border-radius: 12px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.heatmap-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.heatmap-label {
+  width: 100px;
+  font-size: 11px;
+  color: #666;
+  text-align: right;
+  flex-shrink: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.heatmap-bar {
+  height: 20px;
+  border-radius: 4px;
+  background: linear-gradient(90deg, #667eea, #764ba2);
+  transition: width 0.4s ease;
+  min-width: 4px;
+}
+
+.heatmap-value {
+  width: 40px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #333;
+  flex-shrink: 0;
+}
+
+/* 基本信息与模型下载 */
+.basic-info {
+  margin-top: 20px;
+  padding: 16px;
+  background: linear-gradient(145deg, #f8f9fa, #ffffff);
+  border-radius: 12px;
+  border: 1px solid #e9ecef;
+}
+
+.model-download {
+  margin-top: 16px;
+  display: flex;
+  justify-content: center;
 }
 
 .progress-container {
@@ -3580,48 +3523,54 @@ h3 {
 
 @media (max-width: 900px) {
   .main-content {
-    grid-template-columns: 1fr;
+    max-width: 100%;
+    gap: 16px;
+    padding: 0 8px;
   }
 
   .nii-upload-section,
-  .features-section {
-    grid-column: 1;
+  .feature-info-section,
+  .csv-section,
+  .svm-section,
+  .predict-section {
+    padding: 20px;
+  }
+
+  .header {
+    flex-direction: column;
+    gap: 12px;
+    text-align: center;
+  }
+
+  .header h1 {
+    font-size: 20px;
   }
 
   .result-summary {
     flex-direction: column;
   }
+
+  .top-nav {
+    overflow-x: auto;
+  }
+
+  .nav-inner {
+    flex-wrap: nowrap;
+  }
 }
 
-/* ========== 病灶识别模块样式 ========== */
-.predict-section {
-  grid-column: 1 / -1;
-  margin-top: 24px;
-  background: white;
-  border-radius: 16px;
-  padding: 28px;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
-  transition: all 0.3s ease;
+@media (max-width: 768px) {
+  .predict-content {
+    flex-direction: column;
+  }
+
+  .predict-left,
+  .predict-right {
+    width: 100%;
+  }
 }
 
-.predict-section:hover {
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.12);
-  transform: translateY(-2px);
-}
-
-.predict-section h2 {
-  margin: 0 0 24px 0;
-  font-size: 20px;
-  font-weight: 600;
-  color: #1a1a2e;
-  border-bottom: 3px solid transparent;
-  border-image: linear-gradient(135deg, #667eea, #764ba2) 1;
-  padding-bottom: 12px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
+/* 病灶识别模块内部组件样式 */
 .predict-upload {
   display: flex;
   flex-direction: column;
@@ -4077,333 +4026,101 @@ h3 {
   }
 }
 
-.three-d-visualization-section h2 {
-  margin: 0 0 24px 0;
-  font-size: 22px;
-  color: #1a1a2e;
-  font-weight: 700;
+.patient-info-row {
   display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.three-d-content {
-  display: flex;
-  flex-direction: column;
-  gap: 24px;
-}
-
-.three-d-controls {
-  background: linear-gradient(135deg, #f5f7fa 0%, #e8ecf1 100%);
-  padding: 24px;
-  border-radius: 12px;
-  display: flex;
-  flex-direction: column;
   gap: 16px;
-  align-items: flex-start;
+  margin: 12px 0;
 }
 
-.three-d-controls .upload-area {
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.three-d-display {
-  display: flex;
-  flex-direction: column;
-  gap: 24px;
-  animation: fadeIn 0.4s ease;
-}
-
-.three-d-info {
-  background: linear-gradient(135deg, #667eea15 0%, #764ba215 100%);
-  padding: 20px;
-  border-radius: 12px;
-  border: 1px solid #667eea30;
-}
-
-.three-d-info h3 {
-  margin: 0 0 16px 0;
-  font-size: 18px;
-  font-weight: 600;
-  color: #1a1a2e;
-}
-
-.info-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 16px;
-}
-
-.info-item {
+.patient-input-group {
+  flex: 1;
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
 
-.info-label {
+.patient-input-group label {
   font-size: 13px;
-  color: #666;
-  font-weight: 500;
-}
-
-.info-value {
-  font-size: 18px;
-  font-weight: bold;
-  color: #667eea;
-}
-
-.multi-view-container {
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-}
-
-.view-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.view-header h4 {
-  margin: 0;
-  font-size: 16px;
   font-weight: 600;
-  color: #1a1a2e;
+  color: #8892b0;
 }
 
-.slice-nav {
-  display: flex;
-  align-items: center;
-  gap: 12px;
+.patient-input {
+  padding: 8px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  color: #e6f1ff;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.2s;
 }
 
-.nav-btn {
-  background: #667eea;
-  color: white;
-  border: none;
-  padding: 8px 16px;
+.patient-input:focus {
+  border-color: #64ffda;
+}
+
+.detected-patients-section {
+  margin: 16px 0;
+  padding: 16px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 8px;
-  font-size: 14px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s ease;
 }
 
-.nav-btn:hover:not(:disabled) {
-  background: #5568d3;
-  transform: translateY(-2px);
+.detected-patients-section h3 {
+  margin: 0 0 12px 0;
+  font-size: 16px;
+  color: #64ffda;
 }
 
-.nav-btn:disabled {
-  background: #ccc;
-  cursor: not-allowed;
+.patients-table-wrapper {
+  max-height: 300px;
+  overflow-y: auto;
+  margin: 8px 0;
 }
 
-.slice-indicator {
-  font-size: 14px;
-  font-weight: 600;
-  color: #333;
+.patients-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
 }
 
-.slices-gallery {
-  display: flex;
-  gap: 12px;
-  overflow-x: auto;
-  padding: 12px 0;
-  scroll-behavior: smooth;
-}
-
-.slices-gallery::-webkit-scrollbar {
-  height: 6px;
-}
-
-.slices-gallery::-webkit-scrollbar-track {
-  background: #f0f0f0;
-  border-radius: 3px;
-}
-
-.slices-gallery::-webkit-scrollbar-thumb {
-  background: #667eea;
-  border-radius: 3px;
-}
-
-.slice-card {
-  flex-shrink: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  cursor: pointer;
+.patients-table th {
+  text-align: left;
   padding: 8px;
-  border-radius: 10px;
-  border: 2px solid transparent;
-  transition: all 0.2s ease;
-  background: #f8f9fa;
-}
-
-.slice-card:hover {
-  border-color: #667eea50;
-  background: #f0f4ff;
-}
-
-.slice-card.active {
-  border-color: #667eea;
-  background: #e8ecff;
-  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.2);
-}
-
-.slice-thumb {
-  position: relative;
-  width: 120px;
-  height: 120px;
-  border-radius: 8px;
-  overflow: hidden;
-}
-
-.slice-img {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-}
-
-.lesion-marker {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-}
-
-.slice-label {
-  font-size: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  color: #8892b0;
   font-weight: 600;
-  color: #333;
-  text-align: center;
+  position: sticky;
+  top: 0;
 }
 
-.large-slice-display {
+.patients-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  color: #ccd6f6;
+}
+
+.patients-table .selected-row {
+  background: rgba(100, 255, 218, 0.08);
+}
+
+.patients-table .selected-row td {
+  color: #64ffda;
+}
+
+.patients-table .file-ok {
+  color: #64ffda;
+}
+
+.patients-table .file-missing {
+  color: #ff6b6b;
+}
+
+.patient-actions {
   display: flex;
-  flex-direction: column;
   gap: 12px;
-  align-items: center;
-  padding: 20px;
-  background: linear-gradient(135deg, #f5f7fa 0%, #e8ecf1 100%);
-  border-radius: 12px;
-}
-
-.large-slice-display h5 {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 600;
-  color: #1a1a2e;
-}
-
-.large-slice-wrapper {
-  position: relative;
-  display: inline-flex;
-  justify-content: center;
-  align-items: center;
-}
-
-.large-slice-img {
-  max-width: 400px;
-  max-height: 400px;
-  object-fit: contain;
-  border-radius: 8px;
-}
-
-.lesion-overlay-large {
-  position: absolute;
-  top: 0;
-  left: 0;
-  pointer-events: none;
-  animation: pulse 2s ease-in-out infinite;
-}
-
-.lesion-coords {
-  font-size: 14px;
-  color: #666;
-  font-weight: 500;
-}
-
-.point-cloud-section {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.point-cloud-section h4 {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 600;
-  color: #1a1a2e;
-}
-
-.point-cloud-container {
-  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-  border-radius: 12px;
-  padding: 24px;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.point-cloud-view {
-  position: relative;
-  height: 300px;
-  border: 1px solid #667eea30;
-  border-radius: 8px;
-  background: linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 100%);
-  overflow: hidden;
-}
-
-.lesion-point {
-  position: absolute;
-  width: 12px;
-  height: 12px;
-  background: #ff4444;
-  border-radius: 50%;
-  box-shadow: 0 0 10px #ff4444, 0 0 20px #ff444460;
-  pointer-events: none;
-  animation: twinkle 2s ease-in-out infinite;
-}
-
-@keyframes twinkle {
-
-  0%,
-  100% {
-    opacity: 1;
-    box-shadow: 0 0 10px #ff4444, 0 0 20px #ff444460;
-  }
-
-  50% {
-    opacity: 0.6;
-    box-shadow: 0 0 5px #ff4444, 0 0 10px #ff444440;
-  }
-}
-
-.point-cloud-legend {
-  display: flex;
-  justify-content: center;
-}
-
-.legend-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: #fff;
-  font-size: 14px;
-  font-weight: 500;
-}
-
-.legend-dot {
-  width: 12px;
-  height: 12px;
-  background: #ff4444;
-  border-radius: 50%;
-  box-shadow: 0 0 8px #ff444460;
+  margin-top: 12px;
 }
 </style>

@@ -1,13 +1,19 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form
-from fastapi.middleware.cors import CORSMiddleware
+import sys
 import os
 import io
+
+# Windows下强制UTF-8输出，避免emoji等字符导致GBK编码错误
+if sys.platform == 'win32':
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form
+from fastapi.middleware.cors import CORSMiddleware
 import numpy as np
 import SimpleITK as sitk
 import pandas as pd
 import traceback
 import uuid
-import tempfile
+import shutil
 
 app = FastAPI(title="医学影像特征提取服务", version="1.0")
 
@@ -25,16 +31,11 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 # NII文件缓存 - 用来提高预览速度
 nii_cache = {}  # {session_id: {'data': image_array, 'name': filename}}
 
-# 临时文件跟踪
-temp_files_to_clean = []  # 用来跟踪需要清理的临时目录
-
-
 def clean_temp_directory(temp_dir):
     """
     安全清理临时目录
     """
     try:
-        import shutil
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir, ignore_errors=True)
             print(f"✅ 已清理临时目录: {temp_dir}")
@@ -45,31 +46,21 @@ def clean_temp_directory(temp_dir):
 @app.post("/cleanup-temp/")
 async def cleanup_temp():
     """
-    清理临时文件和缓存
+    清理缓存（临时文件已在处理完成后立即删除，无需额外清理）
     """
     try:
-        cleaned_count = 0
-        
-        # 清理跟踪的临时文件
-        for temp_dir in temp_files_to_clean:
-            clean_temp_directory(temp_dir)
-            cleaned_count += 1
-        
         # 清空缓存（节省内存）
         old_cache_size = len(nii_cache)
         nii_cache.clear()
-        
-        # 清空跟踪列表
-        temp_files_to_clean.clear()
-        
-        print(f"🧹 清理完成: 清理了 {cleaned_count} 个临时目录, 释放了 {old_cache_size} 个缓存")
-        
+
+        print(f"🧹 清理完成: 释放了 {old_cache_size} 个缓存")
+
         return {
             "status": "success",
-            "cleaned_directories": cleaned_count,
+            "cleaned_directories": 0,
             "cleared_cache": old_cache_size
         }
-        
+
     except Exception as e:
         print(f"清理失败: {e}")
         raise HTTPException(status_code=500, detail=f"清理失败: {str(e)}")
@@ -80,7 +71,56 @@ async def cleanup_temp():
 # ------------------------------------------------------------------------------
 @app.get("/health")
 def health_check():
-    return {"status": "success", "msg": "医学影像特征提取后端已启动"}
+    return {
+        "status": "success",
+        "msg": "医学影像特征提取后端已启动",
+        "has_pyradiomics": False,
+        "feature_engine": "SimpleITK+numpy (manual extraction)"
+    }
+
+
+# ------------------------------------------------------------------------------
+# NIfTI 预处理：重采样 + 强度归一化
+# ------------------------------------------------------------------------------
+def preprocess_nifti(image: sitk.Image, roi: sitk.Image = None, target_spacing=(1.0, 1.0, 1.0)):
+    """对NIfTI进行重采样到目标间距并做z-score强度归一化"""
+    original_spacing = image.GetSpacing()
+    original_size = image.GetSize()
+    new_size = [int(round(original_size[i] * original_spacing[i] / target_spacing[i])) for i in range(3)]
+
+    resampler = sitk.ResampleImageFilter()
+    resampler.SetOutputSpacing(target_spacing)
+    resampler.SetSize(new_size)
+    resampler.SetOutputDirection(image.GetDirection())
+    resampler.SetOutputOrigin(image.GetOrigin())
+    resampler.SetInterpolator(sitk.sitkLinear)
+    image_resampled = resampler.Execute(image)
+
+    roi_resampled = None
+    if roi is not None:
+        resampler.SetInterpolator(sitk.sitkNearestNeighbor)
+        roi_resampled = resampler.Execute(roi)
+
+    img_arr = sitk.GetArrayFromImage(image_resampled)
+    if img_arr.size > 0:
+        p_low, p_high = np.percentile(img_arr, 0.5), np.percentile(img_arr, 99.5)
+        if p_high > p_low:
+            img_arr = np.clip(img_arr, p_low, p_high)
+
+    body_mask = img_arr > (np.min(img_arr) + 0.01 * (np.max(img_arr) - np.min(img_arr)))
+    if np.any(body_mask):
+        mean_val, std_val = np.mean(img_arr[body_mask]), np.std(img_arr[body_mask])
+    else:
+        mean_val, std_val = np.mean(img_arr), np.std(img_arr)
+    if std_val > 1e-8:
+        img_arr = (img_arr - mean_val) / std_val
+
+    image_processed = sitk.GetImageFromArray(img_arr)
+    image_processed.CopyInformation(image_resampled)
+
+    if roi_resampled is not None:
+        return image_processed, roi_resampled
+    return image_processed
 
 
 # ------------------------------------------------------------------------------
@@ -92,6 +132,9 @@ def extract_features_manual(image_path: str, roi_path: str):
         # 读取影像和 ROI
         image = sitk.ReadImage(image_path)
         roi = sitk.ReadImage(roi_path)
+
+        # 预处理：重采样 + 归一化
+        image, roi = preprocess_nifti(image, roi)
 
         # 转换为 numpy 数组
         img_arr = sitk.GetArrayFromImage(image)
@@ -109,116 +152,106 @@ def extract_features_manual(image_path: str, roi_path: str):
         features = {}
 
         # ========== 一阶统计特征 ==========
-        features['firstorder_mean'] = float(np.mean(roi_voxels))
-        features['firstorder_std'] = float(np.std(roi_voxels))
-        features['firstorder_min'] = float(np.min(roi_voxels))
-        features['firstorder_max'] = float(np.max(roi_voxels))
-        features['firstorder_median'] = float(np.median(roi_voxels))
-        features['firstorder_percentile_25'] = float(np.percentile(roi_voxels, 25))
-        features['firstorder_percentile_75'] = float(np.percentile(roi_voxels, 75))
-        features['firstorder_skewness'] = float(pd.Series(roi_voxels).skew())
-        features['firstorder_kurtosis'] = float(pd.Series(roi_voxels).kurtosis())
-        features['firstorder_energy'] = float(np.sum(roi_voxels ** 2))
+        features['firstorder_Mean'] = float(np.mean(roi_voxels))
+        features['firstorder_StdDev'] = float(np.std(roi_voxels))
+        features['firstorder_Minimum'] = float(np.min(roi_voxels))
+        features['firstorder_Maximum'] = float(np.max(roi_voxels))
+        features['firstorder_Median'] = float(np.median(roi_voxels))
+        features['firstorder_Range'] = float(np.max(roi_voxels) - np.min(roi_voxels))
+        features['firstorder_P25'] = float(np.percentile(roi_voxels, 25))
+        features['firstorder_P75'] = float(np.percentile(roi_voxels, 75))
+        features['firstorder_P10'] = float(np.percentile(roi_voxels, 10))
+        features['firstorder_P90'] = float(np.percentile(roi_voxels, 90))
+        features['firstorder_Skewness'] = float(pd.Series(roi_voxels).skew())
+        features['firstorder_Kurtosis'] = float(pd.Series(roi_voxels).kurtosis())
+        features['firstorder_Energy'] = float(np.sum(roi_voxels ** 2))
 
-        # 计算熵
         hist, _ = np.histogram(roi_voxels, bins=256, density=True)
         hist = hist[hist > 0]
-        features['firstorder_entropy'] = float(-np.sum(hist * np.log2(hist)))
+        features['firstorder_Entropy'] = float(-np.sum(hist * np.log2(hist)))
+        features['firstorder_MeanAbsoluteDeviation'] = float(np.mean(np.abs(roi_voxels - np.mean(roi_voxels))))
+        features['firstorder_RootMeanSquared'] = float(np.sqrt(np.mean(roi_voxels ** 2)))
 
         # ========== 形状特征 ==========
-        # 计算体积（体素数）
         volume = np.sum(roi_mask)
-        features['shape_volume'] = float(volume)
+        features['shape_VoxelVolume'] = float(volume)
 
-        # 计算表面积（使用边缘检测）
         from scipy import ndimage
         edges = ndimage.binary_dilation(roi_mask) ^ roi_mask
         surface_area = np.sum(edges)
-        features['shape_surface_area'] = float(surface_area)
+        features['shape_SurfaceArea'] = float(surface_area)
 
-        # 球形度（简化计算）
         if surface_area > 0:
-            features['shape_sphericity'] = float((np.pi ** (1/3)) * (6 * volume) ** (2/3) / surface_area)
+            features['shape_Sphericity'] = float((np.pi ** (1/3)) * (6 * volume) ** (2/3) / surface_area)
         else:
-            features['shape_sphericity'] = 0.0
+            features['shape_Sphericity'] = 0.0
+        features['shape_SurfaceVolumeRatio'] = float(surface_area / volume) if volume > 0 else 0.0
+        features['shape_Maximum3DDiameter'] = float(max(img_arr.shape))
 
         # ========== 纹理特征（GLCM） ==========
-        # 将 ROI 区域转换为 2D 切片进行 GLCM 计算
         if len(roi_voxels) > 10:
             from skimage.feature import graycomatrix, graycoprops
-            
-            # 找到所有包含ROI的切片
+
             slices_with_roi = []
             for z in range(roi_mask.shape[0]):
                 if np.sum(roi_mask[z, :, :] > 0) > 10:
                     slices_with_roi.append(z)
-            
+
             if len(slices_with_roi) > 0:
-                # 使用所有包含ROI的切片计算GLCM，取平均值
-                contrasts = []
-                correlations = []
-                homogeneities = []
-                dissimilarities = []
-                
-                # 遍历有ROI的切片
-                for z in slices_with_roi[:5]:  # 最多取5个切片
+                angles = [0, np.pi/4, np.pi/2, 3*np.pi/4]
+                contrast_vals = []
+                correlation_vals = []
+                homogeneity_vals = []
+                dissimilarity_vals = []
+                asm_vals = []
+                energy_vals = []
+
+                for z in slices_with_roi:
                     roi_slice = roi_mask[z, :, :]
                     img_slice = img_arr[z, :, :]
                     mask_2d = roi_slice > 0
-                    
                     roi_region = img_slice[mask_2d]
                     min_val, max_val = np.min(roi_region), np.max(roi_region)
-                    
+
                     if max_val > min_val:
-                        # 量化到 16 级灰度
                         quantized = ((roi_region - min_val) / (max_val - min_val) * 15).astype(np.uint8)
                         num_levels = 16
-                        
-                        # 创建量化后的图像（将非ROI区域设为最大灰度级+1）
                         temp_img = np.full_like(img_slice, num_levels, dtype=np.uint8)
                         temp_img[mask_2d] = quantized
-                        
-                        # 计算GLCM（不使用mask参数，而是将背景设为特殊值）
-                        # 只计算水平方向的GLCM
-                        glcm = graycomatrix(temp_img, distances=[1], angles=[0], 
+                        glcm = graycomatrix(temp_img, distances=[1], angles=angles,
                                             levels=num_levels + 1, symmetric=True, normed=True)
-                        
-                        # 提取有效区域的GLCM（排除背景值）
                         glcm_valid = glcm[:num_levels, :num_levels, :, :]
-                        glcm_valid = glcm_valid / np.sum(glcm_valid)  # 重新归一化
-                        
-                        # 计算特征
-                        contrast_val = float(graycoprops(glcm_valid, 'contrast')[0, 0])
-                        correlation_val = float(graycoprops(glcm_valid, 'correlation')[0, 0])
-                        homogeneity_val = float(graycoprops(glcm_valid, 'homogeneity')[0, 0])
-                        dissimilarity_val = float(graycoprops(glcm_valid, 'dissimilarity')[0, 0])
-                        
-                        contrasts.append(contrast_val)
-                        correlations.append(correlation_val)
-                        homogeneities.append(homogeneity_val)
-                        dissimilarities.append(dissimilarity_val)
-                
-                # 取所有切片的平均值
-                if contrasts:
-                    features['glcm_contrast'] = float(np.mean(contrasts))
-                    features['glcm_correlation'] = float(np.mean(correlations))
-                    features['glcm_homogeneity'] = float(np.mean(homogeneities))
-                    features['glcm_dissimilarity'] = float(np.mean(dissimilarities))
+                        glcm_sum = np.sum(glcm_valid, axis=(0, 1), keepdims=True)
+                        glcm_sum[glcm_sum == 0] = 1
+                        glcm_valid = glcm_valid / glcm_sum
+
+                        for a in range(len(angles)):
+                            contrast_vals.append(float(graycoprops(glcm_valid, 'contrast')[0, a]))
+                            correlation_vals.append(float(graycoprops(glcm_valid, 'correlation')[0, a]))
+                            homogeneity_vals.append(float(graycoprops(glcm_valid, 'homogeneity')[0, a]))
+                            dissimilarity_vals.append(float(graycoprops(glcm_valid, 'dissimilarity')[0, a]))
+                            asm_vals.append(float(graycoprops(glcm_valid, 'ASM')[0, a]))
+                            energy_vals.append(float(graycoprops(glcm_valid, 'energy')[0, a]))
+
+                if contrast_vals:
+                    features['glcm_Contrast'] = float(np.mean(contrast_vals))
+                    features['glcm_Correlation'] = float(np.mean(correlation_vals))
+                    features['glcm_Homogeneity'] = float(np.mean(homogeneity_vals))
+                    features['glcm_Dissimilarity'] = float(np.mean(dissimilarity_vals))
+                    features['glcm_ASM'] = float(np.mean(asm_vals))
+                    features['glcm_Energy'] = float(np.mean(energy_vals))
                 else:
-                    features['glcm_contrast'] = 0.0
-                    features['glcm_correlation'] = 0.0
-                    features['glcm_homogeneity'] = 0.0
-                    features['glcm_dissimilarity'] = 0.0
+                    for f in ['glcm_Contrast', 'glcm_Correlation', 'glcm_Homogeneity',
+                               'glcm_Dissimilarity', 'glcm_ASM', 'glcm_Energy']:
+                        features[f] = 0.0
             else:
-                features['glcm_contrast'] = 0.0
-                features['glcm_correlation'] = 0.0
-                features['glcm_homogeneity'] = 0.0
-                features['glcm_dissimilarity'] = 0.0
+                for f in ['glcm_Contrast', 'glcm_Correlation', 'glcm_Homogeneity',
+                           'glcm_Dissimilarity', 'glcm_ASM', 'glcm_Energy']:
+                    features[f] = 0.0
         else:
-            features['glcm_contrast'] = 0.0
-            features['glcm_correlation'] = 0.0
-            features['glcm_homogeneity'] = 0.0
-            features['glcm_dissimilarity'] = 0.0
+            for f in ['glcm_Contrast', 'glcm_Correlation', 'glcm_Homogeneity',
+                       'glcm_Dissimilarity', 'glcm_ASM', 'glcm_Energy']:
+                features[f] = 0.0
 
         return features
 
@@ -254,11 +287,11 @@ async def extract_features(
         if features is None:
             raise HTTPException(status_code=400, detail="ROI为空或提取失败")
 
-        # 模式判断：有传入参数用前端模式，否则用本地批量模式
-        if patient_id and label:
+        # 模式判断：有传入 patient_id 就用前端模式
+        if patient_id is not None:
             # 前端上传模式：使用传入的参数
             final_patient_id = patient_id
-            final_label = label
+            final_label = label if label is not None else ''
         else:
             # 本地批量模式：从文件路径解析
             # image_path示例：uploads/CAI_CHENG_DONG_P00173278/Lung.nii
@@ -276,11 +309,14 @@ async def extract_features(
 
         df = pd.DataFrame([features_with_info])
 
+        feature_count = sum(1 for k in features_with_info if k not in ('sample', 'label'))
+
         return {
             "status": "success",
             "headers": df.columns.tolist(),
             "row": df.values.tolist()[0],
-            "features": features_with_info
+            "features": features_with_info,
+            "feature_count": feature_count
         }
 
     except Exception as e:
@@ -374,14 +410,14 @@ async def extract_features_batch(
                     continue
                 
                 # 确定 label
-                if patient_id and label:
-                    final_label = label
+                if patient_id is not None:
+                    final_label = label if label is not None else ''
                 else:
-                    # 尝试从文件夹名推断label（如果文件夹名包含"良"或"恶"）
-                    if '良' in patient_folder or 'benign' in patient_folder.lower():
-                        final_label = '良性'
-                    elif '恶' in patient_folder or 'malig' in patient_folder.lower():
-                        final_label = '恶性'
+                    # 尝试从文件夹名推断label（输出0或1）
+                    if '恶' in patient_folder or 'malig' in patient_folder.lower() or patient_folder == '0':
+                        final_label = '0'
+                    elif '良' in patient_folder or 'benign' in patient_folder.lower() or patient_folder == '1':
+                        final_label = '1'
                     else:
                         final_label = '未知'
                 
@@ -639,18 +675,47 @@ async def train_svm(
         if y_test is not None: 
             y_test = le.transform(y_test) 
  
-        # ========== 7. 数据标准化 ========== 
-        training_progress[task_id] = {'progress':40,'message':'数据标准化...','status':'running', 'task_id':task_id} 
-        from sklearn.preprocessing import StandardScaler 
-        scaler = StandardScaler() 
-        X_train = scaler.fit_transform(X_train) 
+        # 保存原始数据用于后续特征重要性计算
+        X_train_raw = X_train.copy()
+        X_test_raw = X_test.copy()
+
+        # ========== 7. 数据标准化 ==========
+        training_progress[task_id] = {'progress':40,'message':'数据标准化...','status':'running', 'task_id':task_id}
+        from sklearn.preprocessing import StandardScaler
+        scaler = StandardScaler()
+        X_train = scaler.fit_transform(X_train)
         X_test = scaler.transform(X_test) 
  
         # ========== 8. 训练 SVM ========== 
-        training_progress[task_id] = {'progress':60,'message':'训练SVM模型...','status':'running', 'task_id':task_id} 
-        from sklearn.svm import SVC 
-        model = SVC(kernel='linear', random_state=42, probability=True) 
-        model.fit(X_train, y_train) 
+        training_progress[task_id] = {'progress':45,'message':'网格搜索最优参数...','status':'running', 'task_id':task_id}
+        from sklearn.svm import SVC
+        from sklearn.model_selection import GridSearchCV
+        from collections import Counter
+
+        y_train_dist = Counter(y_train)
+        print(f"训练集类别分布: {dict(y_train_dist)}")
+        if y_test is not None:
+            y_test_dist = Counter(y_test)
+            print(f"测试集类别分布: {dict(y_test_dist)}")
+
+        best_model = None
+        try:
+            base_model = SVC(kernel='rbf', random_state=42, probability=True)
+            param_grid = {
+                'C': [0.1, 1, 10, 100],
+                'gamma': ['scale', 'auto', 0.01, 0.1, 1],
+                'class_weight': ['balanced', None]
+            }
+            grid = GridSearchCV(base_model, param_grid, cv=min(5, len(X_train)), scoring='roc_auc', n_jobs=1)
+            grid.fit(X_train, y_train)
+            best_model = grid.best_estimator_
+            print(f"GridSearchCV最佳参数: {grid.best_params_}, 最佳得分: {grid.best_score_:.4f}")
+        except Exception as e:
+            print(f"GridSearchCV RBF失败: {e}, 回退到线性+balanced")
+            best_model = SVC(kernel='linear', random_state=42, probability=True, class_weight='balanced')
+            best_model.fit(X_train, y_train)
+
+        model = best_model 
         
         training_progress[task_id] = {'progress':80,'message':'训练完成','status':'running', 'task_id':task_id}
  
@@ -667,30 +732,20 @@ async def train_svm(
         train_acc = float(accuracy_score(y_train, y_pred_train)) 
         test_acc = accuracy 
  
-        print(f"训练样本数: {len(X_train)}, 测试样本数: {len(X_test)}") 
-        print(f"训练准确率: {train_acc}, 测试准确率: {test_acc}") 
-        print(f"y_test唯一值: {np.unique(y_test) if y_test is not None else 'None'}") 
-        print(f"y_pred_test唯一值: {np.unique(y_pred_test)}")
- 
-        recall = 0.0 
-        f1 = 0.0 
-        if y_test is not None: 
-            # 尝试不同的平均方式
-            for avg_method in ['weighted', 'macro', 'micro']: 
-                try: 
-                    recall_val = float(recall_score(y_test, y_pred_test, average=avg_method, zero_division=0)) 
-                    f1_val = float(f1_score(y_test, y_pred_test, average=avg_method, zero_division=0)) 
-                    print(f"{avg_method}召回率: {recall_val}, {avg_method} F1: {f1_val}") 
-                    if recall_val > 0 or recall == 0:  # 确保至少有值
-                        recall = recall_val
-                        f1 = f1_val
-                    if recall > 0: 
-                        break 
-                except Exception as e: 
-                    print(f"{avg_method}计算失败: {e}")
+        print(f"训练样本数: {len(X_train)}, 测试样本数: {len(X_test)}")
+        print(f"训练准确率: {train_acc:.4f}, 测试准确率: {test_acc:.4f}")
+        print(f"y_test 真实分布: {Counter(y_test) if y_test is not None else 'None'}")
+        print(f"y_pred_test 预测分布: {Counter(y_pred_test)}")
 
-        cm = confusion_matrix(y_test, y_pred_test).tolist() if y_test is not None else [] 
-        print(f"混淆矩阵: {cm}") 
+        recall = 0.0
+        f1 = 0.0
+        if y_test is not None:
+            recall = float(recall_score(y_test, y_pred_test, average='weighted', zero_division=0))
+            f1 = float(f1_score(y_test, y_pred_test, average='weighted', zero_division=0))
+            print(f"weighted 召回率: {recall:.4f}, weighted F1: {f1:.4f}")
+
+        cm = confusion_matrix(y_test, y_pred_test).tolist() if y_test is not None else []
+        print(f"混淆矩阵: {cm}")
         
         auc = 0.0 
         roc_data = {'fpr': [0.0, 1.0], 'tpr': [0.0, 1.0]}  # 默认绘制对角线
@@ -712,14 +767,65 @@ async def train_svm(
             print(f"类别数不足2个，无法计算AUC: {len(np.unique(y_test))}，使用默认ROC曲线")
         else:
             print("无测试标签，使用默认ROC曲线") 
- 
-        feature_importance = {} 
-        if hasattr(model, 'coef_'): 
-            coefs = model.coef_[0] 
-            abs_coefs = np.abs(coefs) 
-            max_coef = np.max(abs_coefs) if len(abs_coefs) > 0 else 1 
-            for i, feat in enumerate(feature_cols): 
-                feature_importance[feat] = float(abs_coefs[i] / max_coef) 
+
+        # ========== 10.5 SHAP 特征重要性分析 ==========
+        feature_importance = {}
+        try:
+            import shap
+            # 用背景数据采样加速（最多100条）
+            n_background = min(100, len(X_train))
+            background = X_train[:n_background]
+
+            # 用测试数据计算SHAP（最多200条）
+            n_explain = min(200, len(X_test))
+            X_explain = X_test[:n_explain]
+
+            if hasattr(model, 'coef_'):
+                # 线性核：使用LinearExplainer，精确且快速
+                explainer = shap.LinearExplainer(model, background, feature_dependence='independent')
+                shap_values = explainer.shap_values(X_explain)
+                # LinearExplainer返回 (n_samples, n_features)，二分类时有两组
+                if isinstance(shap_values, list):
+                    shap_values = shap_values[1]  # 正类SHAP
+            else:
+                # RBF核：使用PermutationExplainer，比KernelExplainer快
+                explainer = shap.PermutationExplainer(
+                    model.predict_proba, background,
+                    random_state=42
+                )
+                raw_shap = explainer(X_explain, max_evals=500, silent=True)
+                # raw_shap.values shape: (n_samples, n_features, n_classes)
+                if hasattr(raw_shap, 'values'):
+                    shap_values = raw_shap.values[:, :, 1] if raw_shap.values.ndim == 3 else raw_shap.values
+                else:
+                    shap_values = raw_shap
+
+            # 汇总：每个特征的 mean(|SHAP|)
+            mean_abs_shap = np.abs(shap_values).mean(axis=0)
+            max_shap = np.max(mean_abs_shap) if len(mean_abs_shap) > 0 else 1
+            if max_shap > 0:
+                for i, feat in enumerate(feature_cols):
+                    feature_importance[feat] = float(mean_abs_shap[i] / max_shap)
+
+            print(f"SHAP分析完成，特征数: {len(feature_importance)}")
+        except Exception as e:
+            print(f"SHAP分析失败: {e}，回退到系数法")
+            import traceback
+            traceback.print_exc()
+            # 回退：线性用coef_，RBF用原始数据方差
+            if hasattr(model, 'coef_'):
+                coefs = model.coef_[0]
+                abs_coefs = np.abs(coefs)
+                max_coef = np.max(abs_coefs) if len(abs_coefs) > 0 else 1
+                if max_coef > 0:
+                    for i, feat in enumerate(feature_cols):
+                        feature_importance[feat] = float(abs_coefs[i] / max_coef)
+            else:
+                importances = np.std(X_train_raw, axis=0)
+                max_imp = np.max(importances) if len(importances) > 0 else 1
+                if max_imp > 0:
+                    for i, feat in enumerate(feature_cols):
+                        feature_importance[feat] = float(importances[i] / max_imp)
  
         # ========== 完成 ========== 
         training_progress[task_id] = { 
@@ -854,15 +960,13 @@ async def predict_lesion(
     """
     加载模型并对NII影像进行病灶识别
     """
-    import tempfile
-    from pathlib import Path
-    
-    temp_dir = tempfile.mkdtemp()
+    temp_dir = os.path.join(UPLOAD_DIR, f"predict_{uuid.uuid4().hex[:8]}")
+    os.makedirs(temp_dir, exist_ok=True)
     
     try:
         # 保存上传的文件
-        model_path = os.path.join(temp_dir, model_file.filename)
-        nii_path = os.path.join(temp_dir, nii_file.filename)
+        model_path = os.path.join(temp_dir, os.path.basename(model_file.filename))
+        nii_path = os.path.join(temp_dir, os.path.basename(nii_file.filename))
         
         with open(model_path, "wb") as f:
             content = await model_file.read()
@@ -890,13 +994,14 @@ async def predict_lesion(
         
         print(f"模型加载成功，包含 {len(feature_cols)} 个特征")
         
-        # 读取NII影像并提取特征
+        # 读取NII影像并预处理
         print("正在读取NII影像...")
         import SimpleITK as sitk
         image = sitk.ReadImage(nii_path)
+        image = preprocess_nifti(image)  # 重采样 + 归一化
         image_array = sitk.GetArrayFromImage(image)
-        
-        print(f"原始影像数组尺寸: {image_array.shape}")
+
+        print(f"预处理后影像尺寸: {image_array.shape}")
         
         # 生成唯一的会话ID并缓存图像数据
         predict_session_id = str(uuid.uuid4())
@@ -906,6 +1011,9 @@ async def predict_lesion(
             'type': 'predict'
         }
         print(f"图像已缓存，会话ID: {predict_session_id}")
+
+        # 数据已加载到内存，立即清理临时文件
+        clean_temp_directory(temp_dir)
         
         # 提取特征（使用原始图像，不需要降采样）
         print("正在提取影像特征...")
@@ -945,9 +1053,6 @@ async def predict_lesion(
             if isinstance(value, (int, float)) and not np.isnan(value) and not np.isinf(value):
                 feature_summary[key] = float(value)
         
-        # 添加到清理列表（延迟清理，用户关闭页面时清理）
-        temp_files_to_clean.append(temp_dir)
-        
         return {
             "status": "success",
             "predicted_class": str(predicted_class),
@@ -957,6 +1062,8 @@ async def predict_lesion(
             "feature_summary": dict(list(feature_summary.items())[:15])  # 只返回前15个特征
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         # 出错时立即清理
         try:
@@ -1037,145 +1144,147 @@ def extract_manual_features_single_image(image_array):
     features['shape_Flatness'] = 0.5
     features['shape_Elongation'] = 1.3
     
-    # GLCM特征（简化版）
-    features['glcm_Autocorrelation'] = 5000.0 + np.random.rand() * 1000
-    features['glcm_ClusterProminence'] = 50.0 + np.random.rand() * 50
-    features['glcm_ClusterShade'] = 20.0 + np.random.rand() * 30
-    features['glcm_ClusterTendency'] = 100.0 + np.random.rand() * 50
-    features['glcm_Contrast'] = 50.0 + np.random.rand() * 50
-    features['glcm_Correlation'] = 0.3 + np.random.rand() * 0.4
-    features['glcm_DifferenceAverage'] = 5.0 + np.random.rand() * 5
-    features['glcm_DifferenceEntropy'] = 2.0 + np.random.rand() * 2
-    features['glcm_DifferenceVariance'] = 10.0 + np.random.rand() * 10
-    features['glcm_Id'] = 0.7 + np.random.rand() * 0.2
-    features['glcm_Idm'] = 0.6 + np.random.rand() * 0.3
-    features['glcm_Idmn'] = 0.5 + np.random.rand() * 0.3
-    features['glcm_Idn'] = 0.6 + np.random.rand() * 0.3
-    features['glcm_Imc1'] = 0.2 + np.random.rand() * 0.4
-    features['glcm_Imc2'] = 0.4 + np.random.rand() * 0.4
-    features['glcm_InverseVariance'] = 0.3 + np.random.rand() * 0.4
-    features['glcm_JointAverage'] = 50.0 + np.random.rand() * 50
-    features['glcm_JointEnergy'] = 0.001 + np.random.rand() * 0.01
-    features['glcm_JointEntropy'] = 5.0 + np.random.rand() * 3
-    features['glcm_MCC'] = 0.2 + np.random.rand() * 0.5
-    features['glcm_MaximumProbability'] = 0.01 + np.random.rand() * 0.05
-    features['glcm_SumAverage'] = 100.0 + np.random.rand() * 50
-    features['glcm_SumEntropy'] = 6.0 + np.random.rand() * 3
-    features['glcm_SumSquares'] = 300.0 + np.random.rand() * 200
-    
-    # 其他纹理特征
-    features['glrlm_ShortRunEmphasis'] = 0.2 + np.random.rand() * 0.6
-    features['glrlm_LongRunEmphasis'] = 0.3 + np.random.rand() * 0.5
-    features['glrlm_GrayLevelNonUniformity'] = 0.1 + np.random.rand() * 0.4
-    features['glrlm_RunLengthNonUniformity'] = 0.2 + np.random.rand() * 0.5
-    features['glrlm_RunPercentage'] = 0.4 + np.random.rand() * 0.4
-    features['glszm_SmallAreaEmphasis'] = 0.2 + np.random.rand() * 0.6
-    features['glszm_LargeAreaEmphasis'] = 0.3 + np.random.rand() * 0.5
-    features['gldm_SmallDependenceEmphasis'] = 0.2 + np.random.rand() * 0.5
-    features['gldm_LargeDependenceEmphasis'] = 0.3 + np.random.rand() * 0.5
-    features['ngtdm_Coarseness'] = 0.001 + np.random.rand() * 0.01
-    features['ngtdm_Contrast'] = 0.01 + np.random.rand() * 0.05
-    features['ngtdm_Busyness'] = 0.1 + np.random.rand() * 0.5
-    features['ngtdm_Complexity'] = 0.5 + np.random.rand() * 2.0
-    features['ngtdm_Strength'] = 0.2 + np.random.rand() * 0.8
-    
+    # GLCM特征 — 在整个影像的中间切片上计算
+    from skimage.feature import graycomatrix, graycoprops
+    mid_z = image_array.shape[0] // 2
+    mid_slice = image_array[mid_z, :, :]
+    slice_flat = mid_slice.flatten()
+    slice_nonzero = slice_flat[slice_flat > 0]
+    if len(slice_nonzero) > 100:
+        min_val, max_val = np.min(slice_nonzero), np.max(slice_nonzero)
+        if max_val > min_val:
+            quantized = ((slice_nonzero - min_val) / (max_val - min_val) * 15).astype(np.uint8)
+            temp_img = ((mid_slice - min_val) / (max_val - min_val) * 15).clip(0, 15).astype(np.uint8)
+            glcm = graycomatrix(temp_img, distances=[1], angles=[0, np.pi/4, np.pi/2, 3*np.pi/4],
+                                levels=16, symmetric=True, normed=True)
+            features['glcm_Contrast'] = float(np.mean(graycoprops(glcm, 'contrast')))
+            features['glcm_Correlation'] = float(np.mean(graycoprops(glcm, 'correlation')))
+            features['glcm_Homogeneity'] = float(np.mean(graycoprops(glcm, 'homogeneity')))
+            features['glcm_Dissimilarity'] = float(np.mean(graycoprops(glcm, 'dissimilarity')))
+            features['glcm_ASM'] = float(np.mean(graycoprops(glcm, 'ASM')))
+            features['glcm_Energy'] = float(np.mean(graycoprops(glcm, 'energy')))
+        else:
+            for f in ['glcm_Contrast', 'glcm_Correlation', 'glcm_Homogeneity',
+                       'glcm_Dissimilarity', 'glcm_ASM', 'glcm_Energy']:
+                features[f] = 0.0
+    else:
+        for f in ['glcm_Contrast', 'glcm_Correlation', 'glcm_Homogeneity',
+                   'glcm_Dissimilarity', 'glcm_ASM', 'glcm_Energy']:
+            features[f] = 0.0
+
     return features
 
 
 def estimate_lesion_position(image_array, slice_index=None):
     """
-    估算病灶位置（基于影像统计）- 优化内存使用
-    
+    估算病灶位置并提取轮廓边界（连通域分析 + 轮廓检测）
+
     Args:
         image_array: 影像数据数组
         slice_index: 指定的切片索引，如果为None则使用中间切片
-    
+
     Returns:
-        包含x, y, z坐标和相关信息的字典
+        包含x, y, z坐标、轮廓点、边界框和相关信息的字典
     """
+    from scipy import ndimage
+    from skimage.measure import find_contours
+
+    MIN_LESION_AREA = 10  # 最小病灶面积（像素）
+
     try:
-        # 确定要分析的切片
         if slice_index is None:
             if len(image_array.shape) == 3:
                 slice_index = image_array.shape[0] // 2
             else:
                 slice_index = 0
-        
-        # 提取指定的2D切片
+
         if len(image_array.shape) == 3:
             slice_2d = image_array[slice_index, :, :]
             z_position = slice_index
         else:
             slice_2d = image_array
             z_position = 0
-        
+
         h, w = slice_2d.shape
-        
-        # 计算统计量找病灶
-        # 先过滤背景（假设0或低数值是背景）
+
         non_zero_data = slice_2d[slice_2d > np.percentile(slice_2d, 10)]
-        
+
         if len(non_zero_data) == 0:
-            # 如果数据太少，返回中心
-            return {
-                "x": int(w // 2),
-                "y": int(h // 2),
-                "z": int(z_position),
-                "original_width": int(w),
-                "original_height": int(h),
-                "found": True  # 总是返回True，保证有圈显示
-            }
-        
-        # 找到显著高于平均值的区域（潜在病灶）- 降低阈值，更容易检测到
+            return _make_empty_lesion_result(w, h, z_position)
+
         mean_val = np.mean(non_zero_data)
         std_val = np.std(non_zero_data)
-        # 找比平均值高0.5个标准差的区域（降低了阈值）
         threshold = mean_val + 0.5 * std_val
-        
-        # 找到高亮区域
         high_intensity = slice_2d > threshold
-        
+
         if not np.any(high_intensity):
-            # 如果没有明显高亮区，找梯度变化大的区域
-            # 计算水平和垂直梯度
             gy, gx = np.gradient(slice_2d.astype(np.float32))
             gradient_mag = np.sqrt(gx**2 + gy**2)
-            threshold = np.percentile(gradient_mag, 70)  # 降低了百分位数
+            threshold = np.percentile(gradient_mag, 70)
             high_intensity = gradient_mag > threshold
-        
-        # 找到所有符合条件的点
-        positions = np.argwhere(high_intensity)
-        
-        if len(positions) == 0:
-            # 如果还是没找到，返回图像中心
-            return {
-                "x": int(w // 2),
-                "y": int(h // 2),
-                "z": int(z_position),
-                "original_width": int(w),
-                "original_height": int(h),
-                "found": True  # 总是返回True
-            }
-        
+
+        if not np.any(high_intensity):
+            return _make_empty_lesion_result(w, h, z_position)
+
+        # 连通域分析：找到所有连通区域
+        labeled, num_features = ndimage.label(high_intensity)
+        if num_features == 0:
+            return _make_empty_lesion_result(w, h, z_position)
+
+        # 找到最大的连通域
+        region_sizes = ndimage.sum(high_intensity, labeled, range(1, num_features + 1))
+        largest_region_label = np.argmax(region_sizes) + 1
+        largest_area = int(region_sizes[largest_region_label - 1])
+
+        if largest_area < MIN_LESION_AREA:
+            return _make_empty_lesion_result(w, h, z_position)
+
+        # 提取最大连通域的mask
+        lesion_mask = (labeled == largest_region_label)
+
         # 计算质心
+        positions = np.argwhere(lesion_mask)
         center_y = int(np.mean(positions[:, 0]))
         center_x = int(np.mean(positions[:, 1]))
-        
-        h, w = slice_2d.shape
-        
+
+        # 计算边界框
+        y_indices, x_indices = np.where(lesion_mask)
+        y_min, y_max = int(np.min(y_indices)), int(np.max(y_indices))
+        x_min, x_max = int(np.min(x_indices)), int(np.max(x_indices))
+
+        # 使用 find_contours 提取轮廓（level=0.5 for binary mask）
+        contours = find_contours(lesion_mask.astype(np.float64), level=0.5)
+        contour_points = []
+        for contour in contours:
+            # find_contours returns [row, col] = [y, x]
+            pts = [[float(pt[1]), float(pt[0])] for pt in contour]  # → [x, y]
+            # 降采样到最多60个点
+            if len(pts) > 60:
+                step = len(pts) // 60
+                pts = pts[::step]
+            contour_points.append(pts)
+
         return {
             "x": center_x,
             "y": center_y,
             "z": int(z_position),
             "original_width": int(w),
             "original_height": int(h),
-            "found": True
+            "found": True,
+            "bounding_box": {
+                "x_min": x_min,
+                "y_min": y_min,
+                "x_max": x_max,
+                "y_max": y_max
+            },
+            "contour_points": contour_points,
+            "area_pixels": largest_area
         }
+
     except Exception as e:
         print(f"病灶位置估算出错: {e}")
         import traceback
         traceback.print_exc()
-        # 出错时返回中心位置
         h, w = image_array.shape[-2:]
         return {
             "x": int(w // 2),
@@ -1183,43 +1292,26 @@ def estimate_lesion_position(image_array, slice_index=None):
             "z": int(0),
             "original_width": int(w),
             "original_height": int(h),
-            "found": True
+            "found": False,
+            "bounding_box": None,
+            "contour_points": [],
+            "area_pixels": 0
         }
 
 
-def detect_lesions_all_slices(image_array):
-    """
-    检测所有切片的病灶
-    
-    Args:
-        image_array: 3D影像数据数组
-    
-    Returns:
-        包含所有切片病灶信息的列表
-    """
-    lesion_info_list = []
-    
-    if len(image_array.shape) != 3:
-        return lesion_info_list
-    
-    total_slices = image_array.shape[0]
-    
-    # 遍历所有切片
-    for slice_idx in range(total_slices):
-        slice_info = estimate_lesion_position(image_array, slice_idx)
-        
-        # 保存切片数据
-        lesion_info_list.append({
-            "slice_index": slice_idx,
-            "x": slice_info["x"],
-            "y": slice_info["y"],
-            "z": slice_info["z"],
-            "original_width": slice_info["original_width"],
-            "original_height": slice_info["original_height"],
-            "found": slice_info["found"]
-        })
-    
-    return lesion_info_list
+def _make_empty_lesion_result(w, h, z_position):
+    """创建未检测到病灶时的返回结果"""
+    return {
+        "x": int(w // 2),
+        "y": int(h // 2),
+        "z": int(z_position),
+        "original_width": int(w),
+        "original_height": int(h),
+        "found": False,
+        "bounding_box": None,
+        "contour_points": [],
+        "area_pixels": 0
+    }
 
 
 @app.post("/preview-nii/")
@@ -1303,12 +1395,13 @@ async def preview_nii(
         # 情况2: 如果有文件上传，第一次请求，加载并缓存
         if nii_file:
             print(f"📂 第一次加载文件: {nii_file.filename}")
-            
-            temp_dir = tempfile.mkdtemp()
+
+            temp_dir = os.path.join(UPLOAD_DIR, f"preview_{uuid.uuid4().hex[:8]}")
+            os.makedirs(temp_dir, exist_ok=True)
             
             try:
                 # 保存上传的NII文件
-                nii_path = os.path.join(temp_dir, nii_file.filename)
+                nii_path = os.path.join(temp_dir, os.path.basename(nii_file.filename))
                 with open(nii_path, "wb") as f:
                     content = await nii_file.read()
                     f.write(content)
@@ -1329,7 +1422,8 @@ async def preview_nii(
                 print(f"✅ 文件已缓存: {new_session_id}, 总切片: {image_array.shape[0]}")
                 
                 # 添加到清理列表（延迟清理）
-                temp_files_to_clean.append(temp_dir)
+                # 数据已加载到内存，立即清理临时文件
+                clean_temp_directory(temp_dir)
                 
                 # 确定切片索引（默认取中间切片）
                 if slice_index == -1:
@@ -1387,169 +1481,22 @@ async def preview_nii(
                 }
                 
             except Exception as e:
-                import shutil
-                shutil.rmtree(temp_dir, ignore_errors=True)
+                clean_temp_directory(temp_dir)
                 raise e
         
         # 情况3: 没有文件也没有有效的session_id
         raise HTTPException(status_code=400, detail="请提供NII文件或有效的session_id")
         
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"预览失败: {e}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"预览失败: {str(e)}")
 
 
-def detect_lesions_all_slices(image_array):
-    """
-    检测所有切片的病灶
-    
-    Args:
-        image_array: 3D影像数据数组
-    
-    Returns:
-        包含所有切片病灶信息的列表
-    """
-    lesion_info_list = []
-    
-    if len(image_array.shape) != 3:
-        return lesion_info_list
-    
-    total_slices = image_array.shape[0]
-    
-    # 遍历所有切片
-    for slice_idx in range(total_slices):
-        slice_info = estimate_lesion_position(image_array, slice_idx)
-        
-        # 保存切片数据
-        lesion_info_list.append({
-            "slice_index": slice_idx,
-            "x": slice_info["x"],
-            "y": slice_info["y"],
-            "z": slice_info["z"],
-            "original_width": slice_info["original_width"],
-            "original_height": slice_info["original_height"],
-            "found": slice_info["found"]
-        })
-    
-    return lesion_info_list
-
-
-@app.post("/detect-3d-lesions/")
-async def detect_3d_lesions(
-    nii_file: UploadFile = File(None),
-    session_id: str = Form(None)
-):
-    """
-    检测3D影像的所有切片的病灶，并生成立体可视化数据
-    """
-    import base64
-    from io import BytesIO
-    from PIL import Image
-    
-    try:
-        image_array = None
-        
-        # 情况1: 如果有session_id且在缓存中，直接从缓存读取
-        if session_id and session_id in nii_cache:
-            print(f"✅ 使用缓存检测3D病灶: {session_id}")
-            cached_data = nii_cache[session_id]
-            image_array = cached_data['data']
-        
-        # 情况2: 如果有文件上传，加载文件
-        elif nii_file:
-            print(f"📂 检测3D病灶，加载文件: {nii_file.filename}")
-            
-            temp_dir = tempfile.mkdtemp()
-            
-            try:
-                # 保存上传的NII文件
-                nii_path = os.path.join(temp_dir, nii_file.filename)
-                with open(nii_path, "wb") as f:
-                    content = await nii_file.read()
-                    f.write(content)
-                
-                # 读取NII图像
-                image = sitk.ReadImage(nii_path)
-                image_array = sitk.GetArrayFromImage(image)
-                
-                # 缓存数据
-                new_session_id = str(uuid.uuid4())
-                nii_cache[new_session_id] = {
-                    'data': image_array,
-                    'name': nii_file.filename
-                }
-                session_id = new_session_id
-                
-            except Exception as e:
-                import shutil
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                raise e
-        
-        else:
-            raise HTTPException(status_code=400, detail="请提供NII文件或有效的session_id")
-        
-        # 检测所有切片的病灶
-        lesion_info_list = detect_lesions_all_slices(image_array)
-        
-        # 生成关键切片的预览（最多20个切片）
-        preview_slices = []
-        step = max(1, len(lesion_info_list) // 20)
-        selected_slices = list(range(0, len(lesion_info_list), step))
-        
-        for slice_idx in selected_slices:
-            if slice_idx >= image_array.shape[0]:
-                continue
-                
-            slice_data = image_array[slice_idx, :, :]
-            
-            # 归一化到0-255
-            slice_min = np.min(slice_data)
-            slice_max = np.max(slice_data)
-            
-            if slice_max > slice_min:
-                slice_normalized = ((slice_data - slice_min) / (slice_max - slice_min) * 255).astype(np.uint8)
-            else:
-                slice_normalized = np.zeros_like(slice_data, dtype=np.uint8)
-            
-            # 转换为PIL图像
-            pil_image = Image.fromarray(slice_normalized)
-            
-            # 调整大小
-            max_size = 256
-            if max(pil_image.size) > max_size:
-                ratio = max_size / max(pil_image.size)
-                new_size = (int(pil_image.size[0] * ratio), int(pil_image.size[1] * ratio))
-                pil_image = pil_image.resize(new_size, Image.Resampling.LANCZOS)
-            
-            # 转换为Base64
-            buffered = BytesIO()
-            pil_image.save(buffered, format="PNG")
-            img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
-            
-            preview_slices.append({
-                "slice_index": slice_idx,
-                "image": f"data:image/png;base64,{img_base64}",
-                "lesion_info": lesion_info_list[slice_idx]
-            })
-        
-        return {
-            "status": "success",
-            "total_slices": image_array.shape[0],
-            "image_shape": list(image_array.shape),
-            "lesions": lesion_info_list,
-            "preview_slices": preview_slices,
-            "session_id": session_id
-        }
-        
-    except Exception as e:
-        print(f"3D病灶检测失败: {e}")
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"3D病灶检测失败: {str(e)}")
-
-
 # ------------------------------------------------------------------------------
-# 启动端口 5001
+# 启动端口 8000
 # ------------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
